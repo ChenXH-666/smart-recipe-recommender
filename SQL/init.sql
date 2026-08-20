@@ -13,6 +13,7 @@ DROP TABLE IF EXISTS ai_messages;
 DROP TABLE IF EXISTS ai_conversations;
 DROP TABLE IF EXISTS meal_plan_items;
 DROP TABLE IF EXISTS meal_plans;
+DROP TABLE IF EXISTS cooking_note_comments;
 DROP TABLE IF EXISTS cooking_notes;
 DROP TABLE IF EXISTS recipe_reviews;
 DROP TABLE IF EXISTS user_browse_history;
@@ -39,6 +40,7 @@ CREATE TABLE users (
     is_active TINYINT NOT NULL DEFAULT 1,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    preferences JSON COMMENT '用户个性化偏好(cuisines/diet_tags/free_text)',
     UNIQUE KEY uk_username (username),
     UNIQUE KEY uk_email (email)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -97,7 +99,10 @@ CREATE TABLE ingredients (
     name VARCHAR(100) NOT NULL UNIQUE,
     category VARCHAR(50),
     image_url VARCHAR(500),
-    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    food_group VARCHAR(50) COMMENT '食物组（用于营养平均值兜底）',
+    nutrition JSON COMMENT '每100g估算营养 {kcal, protein, fat, carbs}',
+    diet_tags JSON COMMENT '忌口/过敏标签，如 [seafood, spicy]'
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- 3.6 菜谱-食材关联表
@@ -176,13 +181,29 @@ CREATE TABLE cooking_notes (
     is_public TINYINT NOT NULL DEFAULT 1,
     is_deleted TINYINT NOT NULL DEFAULT 0,
     view_count INT UNSIGNED NOT NULL DEFAULT 0,
+    comment_count INT UNSIGNED NOT NULL DEFAULT 0,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     CONSTRAINT fk_note_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     CONSTRAINT fk_note_recipe FOREIGN KEY (related_recipe_id) REFERENCES recipes(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- 3.12 套餐表
+-- 3.12 心得评论表
+CREATE TABLE cooking_note_comments (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    note_id INT NOT NULL,
+    user_id INT NOT NULL,
+    content TEXT NOT NULL,
+    is_deleted TINYINT NOT NULL DEFAULT 0,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    KEY idx_note_id (note_id),
+    KEY idx_user_id (user_id),
+    CONSTRAINT fk_cnc_note FOREIGN KEY (note_id) REFERENCES cooking_notes(id) ON DELETE CASCADE,
+    CONSTRAINT fk_cnc_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 3.13 套餐表
 CREATE TABLE meal_plans (
     id INT AUTO_INCREMENT PRIMARY KEY,
     user_id INT NOT NULL,
@@ -205,7 +226,7 @@ CREATE TABLE meal_plans (
     CONSTRAINT fk_mp_reviewer FOREIGN KEY (reviewer_id) REFERENCES users(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- 3.13 套餐明细表
+-- 3.14 套餐明细表
 CREATE TABLE meal_plan_items (
     id INT AUTO_INCREMENT PRIMARY KEY,
     meal_plan_id INT NOT NULL,
@@ -217,7 +238,7 @@ CREATE TABLE meal_plan_items (
     CONSTRAINT fk_mpi_recipe FOREIGN KEY (recipe_id) REFERENCES recipes(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- 3.14 AI 对话会话表
+-- 3.15 AI 对话会话表
 CREATE TABLE ai_conversations (
     id INT AUTO_INCREMENT PRIMARY KEY,
     user_id INT NOT NULL,
@@ -228,7 +249,7 @@ CREATE TABLE ai_conversations (
     CONSTRAINT fk_conv_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
--- 3.15 AI 消息记录表
+-- 3.16 AI 消息记录表
 CREATE TABLE ai_messages (
     id INT AUTO_INCREMENT PRIMARY KEY,
     conversation_id INT NOT NULL,
