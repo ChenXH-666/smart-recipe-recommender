@@ -600,4 +600,22 @@ onMounted(async () => {
   justify-content: center;
   padding-top: 16px;
 }
+
+@media (max-width: 767px) {
+  .note-header {
+    flex-wrap: wrap;
+  }
+  .note-actions {
+    margin-left: 0;
+    width: 100%;
+  }
+  .comment-header {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .comment-time {
+    margin-left: 0;
+    width: 100%;
+  }
+}
 </style>

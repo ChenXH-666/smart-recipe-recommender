@@ -11,7 +11,6 @@ from app.models import (
 )
 from app.schemas.interaction import MealPlanListOut
 from app.services.rag_service import rag_search
-from app.services.ai_service import generate_recommendation_text
 
 logger = logging.getLogger(__name__)
 
@@ -271,10 +270,6 @@ def _db_keyword_fallback_recipes(
                 "similarity_score": round(1.0 - (len(results) / (limit + 1)), 3),
                 "tags": _format_tags(recipe),
             })
-    if restriction_set:
-        from app.utils.recipe_diet import filter_recipe_ids
-        allowed = filter_recipe_ids(db, [r["id"] for r in results], restriction_set)
-        results = [r for r in results if r["id"] in allowed]
     return results
 
 
@@ -307,92 +302,6 @@ def extract_user_preferences(user_id: int, db: Session) -> List[int]:
         tag_ids.extend([rt.tag_id for rt in history_tags])
 
     return list(set(tag_ids))
-
-
-def get_personalized_recommendations(
-    user_id: int,
-    db: Session,
-    limit: int = 20,
-    restriction_set: Optional[set] = None,
-) -> List[Dict]:
-    """个性推荐：根据用户历史推荐菜谱
-
-    策略说明：
-    - 无浏览/收藏历史：直接返回热门菜谱
-    - 有历史：基于偏好标签推荐；若标签匹配结果不足 limit 数量，用热门菜谱补齐
-    - 补齐时自动排除已在推荐列表中的菜谱，避免重复"""
-    tag_ids = extract_user_preferences(user_id, db)
-    if not tag_ids:
-        # 无历史，返回热门菜谱
-        recipes = (
-            db.query(Recipe)
-            .options(joinedload(Recipe.tags).joinedload(RecipeTag.tag))
-            .filter(
-                Recipe.status == "approved",
-                Recipe.is_deleted == 0,
-            )
-            .order_by(Recipe.view_count.desc())
-            .limit(limit)
-            .all()
-        )
-    else:
-        # 基于标签推荐
-        recipe_ids = [
-            rt.recipe_id for rt in
-            db.query(RecipeTag).filter(
-                RecipeTag.tag_id.in_(tag_ids),
-            ).all()
-        ]
-        recipes = (
-            db.query(Recipe)
-            .options(joinedload(Recipe.tags).joinedload(RecipeTag.tag))
-            .filter(
-                Recipe.id.in_(recipe_ids),
-                Recipe.status == "approved",
-                Recipe.is_deleted == 0,
-            )
-            .order_by(Recipe.favorite_count.desc(), Recipe.view_count.desc())
-            .limit(limit)
-            .all()
-        )
-
-        # 关键修复：如果标签匹配结果不足，用热门菜谱补齐
-        if len(recipes) < limit:
-            existing_ids = {r.id for r in recipes}
-            fill_count = limit - len(recipes)
-            extra_recipes = (
-                db.query(Recipe)
-                .options(joinedload(Recipe.tags).joinedload(RecipeTag.tag))
-                .filter(
-                    Recipe.id.notin_(existing_ids),
-                    Recipe.status == "approved",
-                    Recipe.is_deleted == 0,
-                )
-                .order_by(Recipe.view_count.desc())
-                .limit(fill_count)
-                .all()
-            )
-            recipes.extend(extra_recipes)
-
-    results = []
-    for r in recipes:
-        results.append({
-            "id": r.id,
-            "title": r.title,
-            "description": r.description,
-            "cover_image_url": r.cover_image_url,
-            "difficulty": r.difficulty,
-            "cooking_time": r.cooking_time,
-            "estimated_cost": float(r.estimated_cost) if r.estimated_cost else 0,
-            "view_count": r.view_count,
-            "favorite_count": r.favorite_count,
-            "tags": _format_tags(r),
-        })
-    if restriction_set:
-        from app.utils.recipe_diet import filter_recipe_ids
-        allowed = filter_recipe_ids(db, [r["id"] for r in results], restriction_set)
-        results = [r for r in results if r["id"] in allowed]
-    return results
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -835,32 +744,44 @@ def rag_recommend_by_query(
         logger.error(f"RAG 检索异常（将回退到关键词匹配）: {e}")
         rag_results = []
 
-    # 2. 从 MySQL 获取完整信息
+    # 2. 从 MySQL 获取完整信息（一次批量查询，避免逐条 N+1）
+    rag_ids = [
+        r["source_id"] for r in rag_results
+        if r.get("source_type") == "recipe" and r.get("source_id") not in seen_ids
+    ]
+    seen_ids.update(rag_ids)
+    recipe_by_id: Dict[int, Recipe] = {}
+    if rag_ids:
+        queried_recipes = db.query(Recipe).options(
+            joinedload(Recipe.tags).joinedload(RecipeTag.tag)
+        ).filter(
+            Recipe.id.in_(rag_ids),
+            Recipe.status == "approved",
+            Recipe.is_deleted == 0,
+        ).all()
+        recipe_by_id = {rc.id: rc for rc in queried_recipes}
+
     for r in rag_results:
-        if r.get("source_type") == "recipe" and r.get("source_id") not in seen_ids:
-            seen_ids.add(r["source_id"])
-            recipe = db.query(Recipe).options(
-                joinedload(Recipe.tags).joinedload(RecipeTag.tag)
-            ).filter(
-                Recipe.id == r["source_id"],
-                Recipe.status == "approved",
-                Recipe.is_deleted == 0,
-            ).first()
-            if recipe:
-                cost = float(recipe.estimated_cost) if recipe.estimated_cost else 0
-                if budget is None or cost <= budget:
-                    results.append({
-                        "id": recipe.id,
-                        "title": recipe.title,
-                        "description": recipe.description,
-                        "cover_image_url": recipe.cover_image_url,
-                        "difficulty": recipe.difficulty,
-                        "cooking_time": recipe.cooking_time,
-                        "estimated_cost": cost,
-                        "type": "recipe",
-                        "similarity_score": round(1.0 - (len(results) / (top_k + 1)), 3),
-                        "tags": _format_tags(recipe),
-                    })
+        if r.get("source_type") != "recipe":
+            continue
+        recipe = recipe_by_id.get(r.get("source_id"))
+        if not recipe:
+            continue
+        cost = float(recipe.estimated_cost) if recipe.estimated_cost else 0
+        if budget is not None and cost > budget:
+            continue
+        results.append({
+            "id": recipe.id,
+            "title": recipe.title,
+            "description": recipe.description,
+            "cover_image_url": recipe.cover_image_url,
+            "difficulty": recipe.difficulty,
+            "cooking_time": recipe.cooking_time,
+            "estimated_cost": cost,
+            "type": "recipe",
+            "similarity_score": round(1.0 - (len(results) / (top_k + 1)), 3),
+            "tags": _format_tags(recipe),
+        })
 
     # 3. 若 RAG 未能提供结果（或结果太少），回退到 MySQL 关键词匹配
     if len(results) < 3:

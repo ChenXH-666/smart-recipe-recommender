@@ -246,4 +246,15 @@ onMounted(load)
   justify-content: center;
   padding: 16px 0;
 }
+
+@media (max-width: 767px) {
+  .page-header {
+    flex-wrap: wrap;
+    align-items: flex-start;
+  }
+  .card-meta {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+}
 </style>

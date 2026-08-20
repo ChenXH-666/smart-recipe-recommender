@@ -65,43 +65,6 @@
       </div>
     </div>
 
-    <el-card class="section-card">
-      <template #header>
-        <div class="section-title">
-          <div>
-            <h3>AI 智能推荐</h3>
-            <p v-if="userStore.isLoggedIn">试试对 AI 说一段话，它将为您推荐最合适的菜谱</p>
-            <p v-else>描述你的需求获取推荐候选，登录后可解锁 AI 个性化解读</p>
-          </div>
-        </div>
-      </template>
-      <div class="ai-search">
-        <el-input
-          ref="aiInputRef"
-          v-model="aiQuery"
-          type="textarea"
-          :rows="2"
-          placeholder="例如：我想做一顿简单又好吃的家常菜，预算50元以内..."
-        />
-        <el-button type="primary" :loading="aiLoading" @click="goAiSearch" style="margin-top: 12px">
-          <el-icon><MagicStick /></el-icon>
-          AI 智能推荐
-        </el-button>
-      </div>
-      <div class="quick-tags">
-        <!-- 个性化"猜你想问"：登录后按用户偏好动态更新；点击仅把问题填入输入框 -->
-        <el-tag
-          v-for="tag in quickTags"
-          :key="tag.label"
-          class="qt"
-          @click="fillQuickSuggest(tag.label)"
-          effect="plain"
-        >
-          {{ tag.label }}
-        </el-tag>
-      </div>
-    </el-card>
-
     <el-card class="section-card" v-if="userStore.isLoggedIn && personalizedItems.length">
       <template #header>
         <div class="section-title">
@@ -160,41 +123,14 @@
         </div>
       </div>
     </el-card>
-
-    <el-dialog v-model="showAiResult" title="AI 智能推荐" width="600px">
-      <div v-if="aiCandidates.length" style="margin-bottom: 16px">
-        <p style="margin-bottom: 12px; color: #374151">为你找到以下推荐：</p>
-        <div class="candidate-list">
-          <div v-for="c in aiCandidates" :key="c.id" class="candidate-card" @click="$router.push('/recipes/' + c.id)">
-            <div class="cand-title">{{ c.title }}</div>
-            <div class="cand-meta">
-              <el-tag size="small" v-if="c.difficulty" effect="plain">{{ difficultyText(c.difficulty) }}</el-tag>
-              <span v-if="c.cooking_time"><el-icon><Timer /></el-icon> {{ c.cooking_time }} 分钟</span>
-              <span v-if="c.estimated_cost"><el-icon><Coin /></el-icon> ¥{{ c.estimated_cost }}</span>
-            </div>
-          </div>
-        </div>
-      </div>
-      <div v-if="aiResponse" class="ai-response">
-        <el-icon><ChatDotSquare /></el-icon>
-        <div class="markdown-body" v-html="renderMarkdown(aiResponse)"></div>
-      </div>
-      <div v-if="aiLoading" style="text-align: center; padding: 30px">
-        <el-icon class="is-loading" :size="32"><Loading /></el-icon>
-        <p style="margin-top: 12px; color: #6b7280">AI 正在为你推荐...</p>
-      </div>
-    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, nextTick } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
 import { useUserStore } from '../stores/user'
 import api from '../api'
-import { streamSSE } from '../utils/sse'
-import { renderMarkdown } from '../utils/markdown'
 import RecipeCard from '../components/RecipeCard.vue'
 
 const router = useRouter()
@@ -206,33 +142,6 @@ const personalizedItems = ref([])
 const restrictionText = ref('')
 const stats = ref({ total_recipes: 0, total_meal_plans: 0, total_users: 0, new_recipes_week: 0, new_meal_plans_week: 0, new_users_week: 0 })
 
-const aiQuery = ref('')
-const aiInputRef = ref(null)
-const showAiResult = ref(false)
-const aiLoading = ref(false)
-const aiResponse = ref('')
-const aiCandidates = ref([])
-
-// 通用"猜你想问"预设备题（未登录/无偏好时兜底）
-const defaultQuickTags = [
-  { label: '减脂晚餐', prompt: '帮我推荐几道适合减脂的晚餐，健康又美味' },
-  { label: '快手家常菜', prompt: '我想做几道快手家常菜，简单省时' },
-  { label: '川菜', prompt: '我想吃川菜，帮我推荐几道正宗又好吃的' },
-  { label: '高蛋白', prompt: '帮我推荐几道高蛋白的菜' },
-  { label: '50元以内', prompt: '我想在50元以内做一顿二人餐，帮我搭配' },
-]
-// 个性化"猜你想问"：登录后由后端按收藏/浏览/点评动态生成
-const quickTags = ref(defaultQuickTags)
-
-// 点击预设标签：仅把预设问题填入输入框并聚焦，不自动触发 AI 推荐
-function fillQuickSuggest(label) {
-  const target = quickTags.value.find((t) => t.label === label)
-  aiQuery.value = target ? target.prompt : label
-  nextTick(() => aiInputRef.value?.focus())
-}
-
-const difficultyMap = { easy: '简单', medium: '中等', hard: '困难' }
-
 // 根据当前时间返回问候语
 const greeting = computed(() => {
   const h = new Date().getHours()
@@ -243,75 +152,10 @@ const greeting = computed(() => {
   return '晚上好'
 })
 
-function difficultyText(d) {
-  return difficultyMap[d] || d
-}
-
 function handleSearch() {
   if (!searchText.value.trim()) return
-  // 检测自然语言查询（包含推荐、帮我等关键词），优先走 AI 推荐
-  if (userStore.isLoggedIn && /推荐|帮|给我|一顿|想|吃什么|设计|搭配/.test(searchText.value)) {
-    aiQuery.value = searchText.value
-    goAiSearch()
-    return
-  }
+  // 首页搜索直接进入菜谱浏览检索（AI 对话统一走右下角 AI 助手悬浮入口）
   router.push({ path: '/recipes', query: { keyword: searchText.value } })
-}
-
-/**
- * AI 智能搜索
- * ============
- * 分两种模式（PRD 4.1：游客可获取推荐候选，仅不可发起 AI 多轮对话）：
- *   - 游客：调用免认证的 POST /recommendations/query，仅返回候选菜谱（无 AI 流式对话）
- *   - 登录用户：调用 POST /recommendations/stream-recommend（SSE 流式），
- *     先下发 [CANDIDATES] 候选，再逐 chunk 推送 AI 推荐语
- *
- * SSE 流式读取统一走 utils/sse.js 的 streamSSE（消除重复的 fetch+ReadableStream 代码）
- */
-async function goAiSearch() {
-  if (!aiQuery.value.trim()) return
-  showAiResult.value = true
-  aiLoading.value = true
-  aiResponse.value = ''
-  aiCandidates.value = []
-
-  // 游客：免认证候选推荐
-  if (!userStore.isLoggedIn) {
-    try {
-      const res = await api.post('/recommendations/query', { query: aiQuery.value })
-      aiCandidates.value = res.items || []
-      aiResponse.value = aiCandidates.value.length
-        ? '以上为基于关键词的推荐候选，登录后可获取 AI 个性化解读与多轮对话。'
-        : '未找到匹配菜谱，试试换个描述吧～'
-    } catch (e) {
-      aiResponse.value = '推荐服务暂时不可用，请稍后再试。'
-    } finally {
-      aiLoading.value = false
-    }
-    return
-  }
-
-  // 登录用户：SSE 流式推荐
-  try {
-    let aiText = ''
-    await streamSSE({
-      url: '/api/recommendations/stream-recommend',
-      body: { query: aiQuery.value },
-      onCandidate: (candidates) => { aiCandidates.value = candidates || [] },
-      onChunk: (text) => {
-        aiText += text
-        aiResponse.value = aiText
-      },
-    })
-    if (!aiResponse.value && !aiCandidates.value.length) {
-      aiResponse.value = '未找到匹配菜谱，试试换个描述吧～'
-    }
-  } catch (e) {
-    if (e && e.name === 'AbortError') return
-    aiResponse.value = 'AI 服务暂时不可用，请稍后重试。'
-  } finally {
-    aiLoading.value = false
-  }
 }
 
 async function loadData() {
@@ -355,13 +199,6 @@ async function loadData() {
     try {
       const res = await api.get('/recommendations/personalized', { params: { limit: 8 } })
       personalizedItems.value = res.items || []
-    } catch (e) {
-      console.error(e)
-    }
-    // 加载个性化"猜你想问"预设备题（失败则保持通用列表）
-    try {
-      const res = await api.get('/recommendations/prompts', { params: { limit: 6 } })
-      if (res.items && res.items.length) quickTags.value = res.items
     } catch (e) {
       console.error(e)
     }
@@ -426,6 +263,41 @@ onMounted(loadData)
 @media (max-width: 900px) {
   .stat-row {
     grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+/* 移动端：欢迎栏纵向排列，搜索框占满整行 */
+@media (max-width: 767px) {
+  .welcome-bar {
+    flex-direction: column;
+    align-items: stretch;
+    padding: 18px 20px;
+    gap: 14px;
+  }
+  .quick-search {
+    width: 100%;
+  }
+  .stat-row {
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+  .stat-card {
+    padding: 14px;
+    gap: 10px;
+  }
+  .stat-icon {
+    width: 44px;
+    height: 44px;
+  }
+  .stat-info h3 {
+    font-size: 22px;
+  }
+  .section-title {
+    align-items: flex-start;
+    gap: 8px;
+  }
+  .section-title p {
+    line-height: 1.5;
   }
 }
 
@@ -505,13 +377,6 @@ onMounted(loadData)
   margin: 4px 0 0;
 }
 
-.ai-search {
-  background: #f8fafc;
-  border-radius: 6px;
-  padding: 16px;
-  margin-bottom: 12px;
-}
-
 .recipe-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
@@ -576,74 +441,5 @@ onMounted(loadData)
 .plan-arrow {
   color: #9ca3af;
   font-size: 16px;
-}
-
-.quick-tags {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-  padding-top: 8px;
-}
-
-.qt {
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.qt:hover {
-  transform: translateY(-1px);
-}
-
-.candidate-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.candidate-card {
-  background: #f8fafc;
-  padding: 14px 16px;
-  border-radius: 6px;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.candidate-card:hover {
-  background: #eff6ff;
-}
-
-.cand-title {
-  font-weight: 500;
-  color: #1f2937;
-  margin-bottom: 6px;
-}
-
-.cand-meta {
-  display: flex;
-  gap: 12px;
-  font-size: 12px;
-  color: #6b7280;
-  align-items: center;
-}
-
-.cand-meta span {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.ai-response {
-  background: #f0f9ff;
-  padding: 14px 16px;
-  border-radius: 6px;
-  display: flex;
-  gap: 10px;
-  color: #1e40af;
-  line-height: 1.7;
-}
-
-.ai-response p {
-  flex: 1;
-  margin: 0;
 }
 </style>

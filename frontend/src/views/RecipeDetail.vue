@@ -713,4 +713,26 @@ onMounted(async () => {
     height: 220px;
   }
 }
+
+@media (max-width: 767px) {
+  /* 侧栏内容改为整行堆叠，避免 18/6 分栏在窄屏过窄 */
+  .content-row :deep(.el-col) {
+    flex-basis: 100% !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+  }
+  /* 标题+页头操作按钮换行，作者信息不再右推 */
+  .action-row {
+    flex-wrap: wrap;
+  }
+  .author-info {
+    margin-left: 0;
+    width: 100%;
+  }
+  .tag-row {
+    gap: 6px;
+  }
+}
 </style>

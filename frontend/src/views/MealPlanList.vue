@@ -231,4 +231,16 @@ onMounted(load)
   justify-content: center;
   padding: 16px 0;
 }
+
+@media (max-width: 767px) {
+  .page-header {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+  .page-header .el-button {
+    width: 100%;
+    margin-left: 0;
+  }
+}
 </style>

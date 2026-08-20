@@ -344,4 +344,18 @@ async function changePwd() {
 .avatar-row .el-input {
   flex: 1;
 }
+
+@media (max-width: 767px) {
+  .hero-body {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 12px;
+  }
+  .hero-info {
+    height: auto;
+  }
+  .avatar-row {
+    align-items: flex-start;
+  }
+}
 </style>

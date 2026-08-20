@@ -462,4 +462,65 @@ onMounted(() => {
   bottom: 0;
   box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.03);
 }
+
+/* ===== 移动端适配（≤767px 竖屏浏览） ===== */
+@media (max-width: 767px) {
+  .page-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+  }
+
+  /* 表单标签改为顶部对齐，输入框占满整行 */
+  :deep(.el-form-item) {
+    display: block;
+  }
+  :deep(.el-form-item__label) {
+    float: none;
+    display: block;
+    width: auto !important;
+    text-align: left;
+    margin-bottom: 4px;
+    line-height: 1.5;
+  }
+  :deep(.el-form-item__content) {
+    margin-left: 0 !important;
+    display: block;
+  }
+  :deep(.el-select) {
+    width: 100% !important;
+  }
+
+  /* 基本信息与动态食材/步骤行的多列 → 单列堆叠 */
+  :deep(.el-col) {
+    flex: 0 0 100% !important;
+    max-width: 100% !important;
+  }
+  .dynamic-row :deep(.el-col) {
+    margin-bottom: 10px;
+  }
+  .dynamic-row :deep(.el-col):last-child {
+    margin-bottom: 0;
+  }
+
+  /* 封面预览改自适应宽度 */
+  .cover-preview {
+    width: 100% !important;
+    height: auto;
+  }
+  .cover-preview img {
+    height: auto;
+  }
+
+  /* 底部操作按钮：列排占满整行 */
+  .footer-bar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+  .footer-bar :deep(.el-button) {
+    margin-left: 0;
+    width: 100%;
+  }
+}
 </style>

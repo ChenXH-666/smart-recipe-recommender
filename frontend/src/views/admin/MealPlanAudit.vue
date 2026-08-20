@@ -303,4 +303,28 @@ onMounted(load)
   justify-content: center;
   margin-top: 20px;
 }
+
+/* ===== 移动端适配（≤767px 竖屏浏览） ===== */
+@media (max-width: 767px) {
+  /* 页头按钮 → 列排 */
+  .page-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  /* 搜索工具条：输入框占满一行、按钮换行 */
+  .search-row {
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .search-row :deep(.el-input) {
+    flex: 1 1 100%;
+    width: 100% !important;
+  }
+  .search-row :deep(.el-button) {
+    width: 100%;
+    margin-left: 0;
+  }
+}
 </style>

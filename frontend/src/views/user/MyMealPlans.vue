@@ -184,4 +184,11 @@ load()
 
 .pagination { display: flex; justify-content: center; padding: 16px 0; }
 .empty-box { background: #fff; border: 1px solid #ebeef5; border-radius: 14px; padding: 40px 20px; }
+
+@media (max-width: 767px) {
+  .head-row { flex-direction: column; align-items: stretch; gap: 10px; }
+  .head-row .el-button { width: 100%; margin-left: 0; }
+  .row-card { flex-wrap: wrap; gap: 12px; }
+  .actions { flex-basis: 100%; justify-content: flex-end; flex-wrap: wrap; }
+}
 </style>

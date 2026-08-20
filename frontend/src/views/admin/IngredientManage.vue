@@ -261,4 +261,43 @@ onMounted(load)
   justify-content: center;
   margin-top: 20px;
 }
+
+/* ===== 移动端适配（≤767px 竖屏浏览） ===== */
+@media (max-width: 767px) {
+  /* 页头按钮 → 列排 */
+  .page-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  /* 顶部表单行：按钮与输入框换行列排，且输入框占满整行 */
+  .form-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+  .form-row :deep(.el-input) {
+    width: 100% !important;
+  }
+  .form-row :deep(.el-button) {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  /* 编辑对话框内表单标签改为顶部对齐 */
+  :deep(.el-dialog .el-form-item) {
+    display: block;
+  }
+  :deep(.el-dialog .el-form-item__label) {
+    float: none;
+    display: block;
+    width: auto !important;
+    text-align: left;
+    margin-bottom: 4px;
+  }
+  :deep(.el-dialog .el-form-item__content) {
+    margin-left: 0 !important;
+  }
+}
 </style>

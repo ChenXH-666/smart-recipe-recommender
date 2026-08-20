@@ -257,4 +257,32 @@ async function handleLogin() {
   font-size: 12px;
   color: #9ca3af;
 }
+
+@media (max-width: 767px) {
+  .login-page {
+    padding: 12px;
+  }
+  .login-container {
+    flex-direction: column;
+    height: auto;
+    min-height: 0;
+  }
+  .login-left {
+    padding: 32px 20px;
+  }
+  .login-right {
+    padding: 28px 20px;
+  }
+  .brand h1 {
+    font-size: 24px;
+  }
+  .features {
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+  .feature-item {
+    padding: 10px 12px;
+    font-size: 13px;
+  }
+}
 </style>

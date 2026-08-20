@@ -225,4 +225,12 @@ onMounted(async () => {
     margin-bottom: 12px;
   }
 }
+
+/* 更窄屏（≤767px）：统计卡片与功能入口改为单列占满，避免挤压 */
+@media (max-width: 767px) {
+  :deep(.el-col) {
+    flex: 0 0 100% !important;
+    max-width: 100% !important;
+  }
+}
 </style>

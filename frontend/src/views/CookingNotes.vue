@@ -492,4 +492,34 @@ onMounted(() => {
 .recipe-link:hover {
   text-decoration: underline;
 }
+
+@media (max-width: 767px) {
+  .page-header {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+  .page-header .el-button {
+    width: 100%;
+    margin-left: 0;
+  }
+  /* 筛选栏纵向堆叠，内联宽度控件占满整行避免溢出 */
+  .filter-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+  .filter-row > * {
+    width: 100% !important;
+  }
+  /* 底部元信息和展开提示换行 */
+  .note-footer {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .meta-left {
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+}
 </style>

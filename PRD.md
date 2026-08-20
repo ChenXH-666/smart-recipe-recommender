@@ -150,12 +150,13 @@
 | FR-REC01 | 个性化推荐 | 已登录用户基于收藏与浏览历史生成推荐；未登录用户返回空列表由前端展示热门替代 | P0 |
 | FR-REC02 | 预算推荐 | 按用户预算金额筛选菜谱，可选餐次类型过滤；在预算内自动生成 2 菜/3 菜组合（贪心 + 成本剪枝） | P0 |
 | FR-REC03 | 自然语言推荐 | 用户输入自然语言描述，系统通过 RAG 检索菜谱并返回 top-K 候选 | P0 |
-| FR-REC04 | 流式智能推荐 | 在 FR-REC03 基础上，先返回候选菜谱，再由 LLM 流式生成推荐语；自动创建会话记录 | P0 |
+| FR-REC04 | 流式智能推荐 | 推荐能力统一收敛到右下角「AI 助手」多轮对话（`/api/ai/chat`，对话中借 RAG 检索相关菜谱后由 LLM 流式生成推荐语）与菜谱列表「智能搜索」（`/api/recommendations/query`）两级入口；会话内仅保存用户的真实输入，不落盘内部系统提示词 | P0 |
 
 **验收标准**：
 - RAG 检索失败时降级到关键词 n-gram 评分匹配，保证接口不报错
 - 推荐结果支持预算约束合并去重
-- 候选菜谱在 SSE 流中通过 `[CANDIDATES]` 标记优先下发
+- 菜谱列表「智能搜索」（`/query`）以 JSON 返回候选列表；AI 助手对话以 SSE 流式返回推荐内容
+- 对话记录中的用户消息仅含用户输入（不含"请根据候选列表..."等系统提示词）；首页不再展示「AI 智能推荐」入口，AI 对话统一经右下角悬浮 AI 助手入口
 
 ### 2.3 次要功能（P1/P2）
 
@@ -336,9 +337,9 @@
 | **用例 ID** | UC-01 |
 | **参与者** | 普通用户 |
 | **前置条件** | 用户已登录 |
-| **主流程** | 1. 用户在首页推荐栏输入需求（如"设计一顿减脂晚餐，预算 30 元"）<br>2. 前端调用 `POST /api/recommendations/stream-recommend`<br>3. 后端通过 RAG 检索菜谱，合并预算约束结果<br>4. 通过 SSE 先下发 `[CANDIDATES]` 候选列表<br>5. LLM 流式生成推荐语，逐 token 推送<br>6. 前端实时渲染候选卡片与推荐文本<br>7. 流结束收到 `[DONE]` 标记，会话保存到历史 |
-| **备选流程** | - RAG 检索失败 → 降级关键词匹配<br>- LLM 调用失败 → 候选菜谱仍展示，文案降级提示<br>- 预算为空 → 跳过预算合并步骤 |
-| **后置条件** | 候选菜谱展示在页面，AI 推荐语完整呈现；会话与消息持久化 |
+| **主流程** | 1. 用户在右下角「AI 助手」对话中输入自然语言需求（如"设计一顿减脂晚餐，预算 30 元"）<br>2. 前端调用 `POST /api/ai/chat`（多轮对话），AI 结合 RAG 检索结果流式生成推荐<br>3. 后端通过 RAG 检索菜谱，合并预算约束等上下文<br>4. LLM 流式生成推荐语，逐 token 推送，结束后保存 AI 回复<br>5. 流结束收到 `[DONE]` 标记<br>6. 对话保存在「个人中心 → AI 对话记录」，用户消息仅含真实输入，不含内部系统提示词 |
+| **备选流程** | - RAG 检索失败 → 降级关键词匹配<br>- LLM 调用失败 → 返回友好降级提示，不崩溃<br>- 预算为空 → 跳过预算合并步骤<br>- 游客（未登录）→ 可通过菜谱列表「智能搜索」获取候选，但不发起 AI 对话 |
+| **后置条件** | 会话与完整消息持久化；用户可在 AI 对话记录中随时回看并继续多轮追问 |
 
 #### UC-02：AI 烹饪助手多轮对话
 
@@ -774,7 +775,7 @@
 | 套餐 | `/api/meal-plans` | GET /, GET /{id}, POST /, PUT /{id}, DELETE /{id} |
 | 统计 | `/api/stats` | GET /（首页菜谱/套餐/用户总量 + 近 7 天新增） |
 | AI 助手 | `/api/ai` | POST /chat (SSE), GET /conversations, DELETE /conversations/{id} |
-| 智能推荐 | `/api/recommendations` | GET /personalized, GET /by-budget, POST /query, POST /stream-recommend (SSE) |
+| 智能推荐 | `/api/recommendations` | GET /personalized, GET /meal-plans, GET /prompts, POST /query |
 | 后台管理 | `/api/admin` | GET /dashboard, POST /recipes/{id}/audit, POST /meal-plans/{id}/audit, GET /users, ... |
 | 健康检查 | `/api/health` | GET / |
 

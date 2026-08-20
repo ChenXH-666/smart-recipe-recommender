@@ -140,7 +140,6 @@ export const users = {
 
 export const recommendations = {
   personalized: (params) => api.get('/recommendations/personalized', { params }),
-  byBudget: (params) => api.get('/recommendations/by-budget', { params }),
   query: (data) => api.post('/recommendations/query', data),
 }
 

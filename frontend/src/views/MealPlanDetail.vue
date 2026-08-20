@@ -486,4 +486,21 @@ onMounted(async () => {
     height: 180px;
   }
 }
+
+@media (max-width: 767px) {
+  .action-row {
+    flex-wrap: wrap;
+  }
+  .shop-summary {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+  }
+  .shop-hint {
+    text-align: left;
+  }
+  .shop-row {
+    flex-wrap: wrap;
+  }
+}
 </style>

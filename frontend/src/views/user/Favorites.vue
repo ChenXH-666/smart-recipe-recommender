@@ -342,4 +342,14 @@ load()
   justify-content: center;
   padding: 16px 0;
 }
+
+@media (max-width: 767px) {
+  .card-meta {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .card-footer .el-button {
+    margin-left: 0;
+  }
+}
 </style>

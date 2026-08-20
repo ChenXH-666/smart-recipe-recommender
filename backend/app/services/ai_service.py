@@ -37,14 +37,14 @@ AI 对话引擎 —— LLM 调用、流式对话、对话记忆管理
 
 import logging
 from collections import OrderedDict
-from typing import AsyncGenerator, List, Dict, Optional
+from typing import AsyncGenerator, List, Dict
 
 from langchain_openai import ChatOpenAI
 from langchain_classic.memory import ConversationBufferMemory
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 from app.config import get_settings
-from app.services.rag_service import rag_search, get_vectorstore
+from app.services.rag_service import rag_search
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -215,43 +215,3 @@ async def chat_stream(
     # 保存到 memory（用于后续对话上下文）
     memory.chat_memory.add_user_message(message)
     memory.chat_memory.add_ai_message(full_response)
-
-
-def generate_recommendation_text(
-    query: str,
-    candidates: List[Dict],
-    budget: Optional[float] = None,
-) -> str:
-    """
-    生成推荐文本 —— 非流式，用于推荐引擎的内部调用。
-
-    与 chat_stream 的区别：
-      - chat_stream：面向用户的对话交互，流式输出
-      - generate_recommendation_text：推荐引擎触发，一次性生成推荐理由
-    """
-    llm = _get_llm()
-
-    parts = [f"用户需求：{query}"]
-    if budget:
-        parts.append(f"预算限制：{budget}元以内")
-
-    parts.append("\n以下是候选菜谱/套餐：")
-    for i, c in enumerate(candidates, 1):
-        parts.append(f"\n{i}. {c.get('title', '')} - 成本：{c.get('cost', 'N/A')}元")
-        if c.get('description'):
-            parts.append(f"   简介：{c['description']}")
-
-    prompt = f"""请根据以下信息为用户生成个性化的菜谱推荐回复：
-
-{' '.join(parts)}
-
-请用中文回复，推荐合适的菜谱或套餐组合，说明推荐理由。
-如果涉及预算，要确保总成本在预算范围内。
-语气要热情、专业、有帮助。"""
-
-    try:
-        response = llm.invoke(prompt)
-        return response.content
-    except Exception as e:
-        logger.error(f"生成推荐文本失败: {e}")
-        return "推荐系统暂时不可用，请稍后再试。"

@@ -491,4 +491,60 @@ onMounted(async () => {
   bottom: 0;
   box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.03);
 }
+
+/* ===== 移动端适配（≤767px 竖屏浏览） ===== */
+@media (max-width: 767px) {
+  .page-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+  }
+
+  /* 表单标签改为顶部对齐，输入框占满整行 */
+  :deep(.el-form-item) {
+    display: block;
+  }
+  :deep(.el-form-item__label) {
+    float: none;
+    display: block;
+    width: auto !important;
+    text-align: left;
+    margin-bottom: 4px;
+    line-height: 1.5;
+  }
+  :deep(.el-form-item__content) {
+    margin-left: 0 !important;
+    display: block;
+  }
+
+  /* 套餐菜品行的多列 → 单列堆叠 */
+  :deep(.el-col) {
+    flex: 0 0 100% !important;
+    max-width: 100% !important;
+  }
+  .dynamic-row :deep(.el-col) {
+    margin-bottom: 10px;
+  }
+  .dynamic-row :deep(.el-col):last-child {
+    margin-bottom: 0;
+  }
+
+  /* 添加菜品 / 从我的收藏添加 按钮换行列排 */
+  .form-card :deep(.el-button--primary),
+  .form-card :deep(.el-button--success) {
+    width: 100%;
+    margin-left: 0 !important;
+  }
+
+  /* 底部操作按钮：列排占满整行 */
+  .footer-bar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+  .footer-bar :deep(.el-button) {
+    margin-left: 0;
+    width: 100%;
+  }
+}
 </style>

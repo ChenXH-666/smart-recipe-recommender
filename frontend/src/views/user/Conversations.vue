@@ -607,4 +607,18 @@ onMounted(load)
   color: #909399;
   font-size: 14px;
 }
+
+@media (max-width: 767px) {
+  .page-header {
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .card-footer {
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .footer-actions {
+    flex-wrap: wrap;
+  }
+}
 </style>

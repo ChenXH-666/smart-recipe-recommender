@@ -1,15 +1,14 @@
 /**
  * SSE（Server-Sent Events）流式请求工具
  * ========================
- * 统一封装 AI 对话与流式推荐的 SSE 流式读取逻辑，消除 Home.vue 与 AiChatDialog.vue
- * 中的重复代码（fetch + ReadableStream + TextDecoder + data: 协议解析）。
+ * 统一封装 AI 对话的 SSE 流式读取逻辑，供 AiChatDialog 使用
+ * （fetch + ReadableStream + TextDecoder + data: 协议解析）。
  *
  * 为什么不用 axios？
  *   axios 不支持 response.body.getReader() 流式读取，必须用原生 fetch。
  *
- * SSE 协议（与后端 app/api/ai.py、recommendations.py 约定）：
+ * SSE 协议（与后端 app/api/ai.py 约定）：
  *   - : keepalive                → 注释行（忽略，后端用于保活防代理超时）
- *   - data: [CANDIDATES]{json}   → 候选列表（仅流式推荐 stream-recommend 下发）
  *   - data: {json-encoded-text}  → 文本 chunk（用 JSON 编码防止换行破坏协议）
  *   - data: [DONE]               → 流结束标记
  *
@@ -31,7 +30,6 @@ import { getAuthToken } from './auth'
  * @param {string} opts.url 请求地址（如 /api/ai/chat）
  * @param {Object} opts.body 请求体（将 JSON.stringify）
  * @param {Object} [opts.headers] 额外请求头
- * @param {Function} [opts.onCandidate] 候选列表回调：(candidates: Array) => void
  * @param {Function} [opts.onChunk] 文本 chunk 回调：(text: string) => void
  * @param {Function} [opts.onDone] 流结束回调：() => void
  * @param {AbortSignal} [opts.signal] 中断信号（AbortController.signal）
@@ -42,7 +40,6 @@ export async function streamSSE({
   url,
   body,
   headers = {},
-  onCandidate,
   onChunk,
   onDone,
   signal,
@@ -144,16 +141,6 @@ export async function streamSSE({
         if (data === '[DONE]') {
           if (onDone) onDone()
           return { conversationId }
-        }
-
-        if (data.startsWith('[CANDIDATES]')) {
-          try {
-            const candidates = JSON.parse(data.slice(12))
-            if (onCandidate) onCandidate(candidates)
-          } catch (_e) {
-            /* 候选列表解析失败时忽略，不阻断文本流 */
-          }
-          continue
         }
 
         // 文本 chunk：后端用 JSON 编码（防止换行破坏 SSE 协议）

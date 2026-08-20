@@ -149,4 +149,15 @@ onMounted(load)
   font-weight: 600;
   color: #303133;
 }
+
+@media (max-width: 767px) {
+  .section-header {
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .hint {
+    margin-left: 0;
+    width: 100%;
+  }
+}
 </style>

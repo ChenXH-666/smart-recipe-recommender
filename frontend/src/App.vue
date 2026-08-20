@@ -238,4 +238,61 @@ h1, h2, h3, h4, h5, h6 {
 .mt-16 { margin-top: 16px; }
 .mb-8 { margin-bottom: 8px; }
 .mb-16 { margin-bottom: 16px; }
+
+/* ===================== 移动端适配（全局，级联覆盖 Element Plus 组件） ===================== */
+@media (max-width: 767px) {
+  html, body {
+    /* 避免横向滚动条撑破窄屏布局 */
+    overflow-x: hidden;
+  }
+
+  /* 弹窗：窄屏下改为近全屏，并让内容区可滚动，避免超出可视区 */
+  .el-dialog {
+    width: calc(100vw - 24px) !important;
+    margin-top: 3vh !important;
+    max-height: 94vh;
+    display: flex;
+    flex-direction: column;
+  }
+  .el-dialog__body {
+    overflow-y: auto;
+    padding: 14px 16px;
+  }
+  .el-dialog__header {
+    padding: 14px 16px 12px;
+  }
+  .el-dialog__footer {
+    padding: 12px 16px 14px;
+  }
+  .el-dialog--center .el-dialog__footer {
+    padding: 12px 16px 14px;
+  }
+
+  /* 抽屉：窄屏下全宽 */
+  .el-drawer {
+    width: 100% !important;
+  }
+
+  /* 表格：窄屏下允许横向滚动，防止撑破布局 */
+  .el-table__body-wrapper {
+    overflow-x: auto;
+  }
+
+  /* 内联表单：窄屏下每个表单项占满整行，自然换行 */
+  .el-form--inline .el-form-item {
+    margin-right: 0;
+    width: 100%;
+    display: block;
+  }
+  .el-form--inline .el-form-item__content {
+    width: 100%;
+  }
+
+  /* 分页、底部操作区：窄屏下居中并允许换行 */
+  .el-pagination {
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 4px;
+  }
+}
 </style>

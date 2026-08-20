@@ -39,7 +39,7 @@
 
 | 路由 | 页面 | 说明 |
 |------|------|------|
-| `/` | Home | 首页，热门推荐 + AI 智能搜索 |
+| `/` | Home | 首页，热门/为你推荐 + 菜谱与套餐概览；AI 对话统一走右下角 AI 助手悬浮入口 |
 | `/recipes` | RecipeList | 菜谱浏览（筛选/搜索） |
 | `/recipes/create` | RecipeCreate | 创建菜谱 |
 | `/recipes/:id` | RecipeDetail | 菜谱详情 + 评价 |

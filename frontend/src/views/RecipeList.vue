@@ -260,4 +260,23 @@ onMounted(() => {
   justify-content: center;
   padding: 16px 0;
 }
+
+/* 移动端：筛选区纵向堆叠占满整行 */
+@media (max-width: 767px) {
+  .filters-header {
+    flex-direction: column;
+    gap: 12px;
+    align-items: stretch;
+  }
+  .filters-row {
+    align-items: stretch;
+  }
+  .filters-row > * {
+    width: 100% !important;
+    margin-right: 0;
+  }
+  .filters-row .el-divider {
+    display: none;
+  }
+}
 </style>
