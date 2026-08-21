@@ -66,6 +66,7 @@ const routes = [
       { path: 'history', name: 'History', component: () => import('../views/user/History.vue') },
       { path: 'conversations', name: 'Conversations', component: () => import('../views/user/Conversations.vue') },
       { path: 'preferences', name: 'Preferences', component: () => import('../views/user/Preferences.vue') },
+      { path: 'todo', name: 'TodoList', component: () => import('../views/user/TodoList.vue') },
       { path: 'my-recipes', name: 'MyRecipes', component: () => import('../views/user/MyRecipes.vue') },
       { path: 'my-meal-plans', name: 'MyMealPlans', component: () => import('../views/user/MyMealPlans.vue') },
     ],

@@ -84,10 +84,16 @@
 
     <!-- ===== 菜谱合集悬浮入口 + AI 助手悬浮按钮（仅登录用户可见） ===== -->
     <div class="float-stack" v-if="userStore.isLoggedIn">
-      <el-tooltip content="菜谱合集" placement="left">
+      <el-tooltip content="菜谱合集（一键生成套餐）" placement="left">
         <div class="cart-float" @click="cartVisible = true">
-          <el-icon :size="24"><ShoppingCart /></el-icon>
+          <el-icon :size="24"><Collection /></el-icon>
           <span v-if="cart.count" class="cart-badge">{{ cart.count }}</span>
+        </div>
+      </el-tooltip>
+      <el-tooltip content="待做清单" placement="left">
+        <div class="todo-float" @click="todoVisible = true">
+          <el-icon :size="24"><Timer /></el-icon>
+          <span v-if="todo.count" class="cart-badge">{{ todo.count }}</span>
         </div>
       </el-tooltip>
       <el-tooltip content="AI 烹饪助手" placement="left">
@@ -97,9 +103,11 @@
       </el-tooltip>
     </div>
 
-    <!-- 菜谱合集弹窗 -->
-    <el-dialog v-model="cartVisible" title="我的菜谱合集" width="520px" align-center>
-      <p v-if="!cart.count" class="cart-empty">还没有菜谱，去菜谱列表点卡片上的合集图标试试</p>
+    <!-- A：菜谱合集（收集菜谱 → 一键生成套餐） -->
+    <el-dialog v-model="cartVisible" title="菜谱合集（一键生成套餐）" width="520px" align-center>
+      <p v-if="!cart.count" class="cart-empty">
+        还没有选菜。去菜谱列表点卡片右上角第一个图标收集，随后一键生成套餐。
+      </p>
       <div v-else class="cart-list">
         <div v-for="it in cart.items" :key="it.id" class="cart-row">
           <span class="cart-title">{{ it.title }}</span>
@@ -108,12 +116,31 @@
           </el-button>
         </div>
       </div>
-      <template #footer>
+      <div class="cart-actions">
         <el-button @click="cart.clear()" :disabled="!cart.count">清空</el-button>
         <el-button type="primary" :disabled="!cart.count" @click="createPlanFromCart">
           <el-icon><Plus /></el-icon>一键生成套餐
         </el-button>
-      </template>
+      </div>
+    </el-dialog>
+
+    <!-- B：待做清单（暂存近期想做的菜） -->
+    <el-dialog v-model="todoVisible" title="待做清单" width="520px" align-center>
+      <p v-if="!todo.count" class="cart-empty">
+        还没有待做的菜。在菜谱卡片上点时钟图标，把下一顿/近期想做的菜先收进来。
+      </p>
+      <div v-else class="cart-list">
+        <div v-for="it in todo.items" :key="it.id" class="cart-row">
+          <span class="cart-title">{{ it.title }}</span>
+          <el-button size="small" type="danger" plain circle @click="todo.remove(it.id)">
+            <el-icon><Close /></el-icon>
+          </el-button>
+        </div>
+      </div>
+      <div class="cart-actions">
+        <el-button @click="todo.clear()" :disabled="!todo.count">清空</el-button>
+        <el-button type="primary" plain @click="router.push('/user/todo'); todoVisible = false">查看全部</el-button>
+      </div>
     </el-dialog>
 
     <!-- AI 对话侧边栏（Drawer 形式） -->
@@ -127,6 +154,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useUserStore } from '../stores/user'
 import { useAiChatStore } from '../stores/aiChat'
 import { useRecipeCartStore } from '../stores/recipeCart'
+import { useTodoListStore } from '../stores/todoList'
 import { ElMessage } from 'element-plus'
 import AiChatDialog from '../components/AiChatDialog.vue'
 import { User } from '@element-plus/icons-vue'
@@ -136,7 +164,9 @@ const router = useRouter()
 const userStore = useUserStore()
 const aiChatStore = useAiChatStore()
 const cart = useRecipeCartStore()
+const todo = useTodoListStore()
 const cartVisible = ref(false)
+const todoVisible = ref(false)
 
 // 一键生成套餐：跳转到套餐创建页预填（不立即清合集，成功提交套餐后再清）
 function createPlanFromCart() {
@@ -194,6 +224,7 @@ const breadcrumbs = computed(() => {
   // 个人中心子页面：返回「个人中心 → 具体页面」两级，个人中心可点击回资料页
   const userPages = {
     'user/profile': '个人主页',
+    'user/todo': '待做清单',
     'user/favorites': '我的收藏',
     'user/history': '浏览历史',
     'user/conversations': 'AI对话记录',
@@ -402,6 +433,25 @@ function handleCommand(cmd) {
   transform: translateY(-2px);
   background: #eff6ff;
 }
+.todo-float {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: #ffffff;
+  color: #f59e0b;
+  border: 2px solid #f59e0b;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  position: relative;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.15);
+  transition: all 0.25s;
+}
+.todo-float:hover {
+  transform: translateY(-2px);
+  background: #fff7e6;
+}
 .cart-badge {
   position: absolute;
   top: -5px;
@@ -421,6 +471,12 @@ function handleCommand(cmd) {
   color: #909399;
   text-align: center;
   margin: 0;
+}
+.cart-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
 }
 .cart-list {
   display: flex;

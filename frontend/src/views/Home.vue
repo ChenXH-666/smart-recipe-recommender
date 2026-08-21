@@ -421,12 +421,16 @@ onMounted(loadData)
   overflow-x: auto;
   padding-bottom: 8px;
   scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+  scroll-snap-type: x mandatory;
 }
 .scroll-row::-webkit-scrollbar {
   display: none;
 }
 .scroll-row :deep(.recipe-card) {
   flex: 0 0 240px;
+  scroll-snap-align: start;
+  scroll-snap-stop: always;
 }
 
 .plan-grid {

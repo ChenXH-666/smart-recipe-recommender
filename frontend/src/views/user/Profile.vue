@@ -115,6 +115,7 @@ const profileForm = reactive({
 
 // 功能入口（社交主页风格编排）
 const entries = [
+  { name: '待做清单', desc: '近期打算做的菜', icon: 'Timer', color: '#ea580c', bg: '#fff7ed', path: '/user/todo' },
   { name: '我的菜谱', desc: '菜谱与草稿管理', icon: 'KnifeFork', color: '#2563eb', bg: '#eff6ff', path: '/user/my-recipes' },
   { name: '我的套餐', desc: '套餐与草稿管理', icon: 'Calendar', color: '#059669', bg: '#ecfdf5', path: '/user/my-meal-plans' },
   { name: '我的收藏', desc: '我收藏的菜谱', icon: 'Star', color: '#f59e0b', bg: '#fff7ed', path: '/user/favorites' },

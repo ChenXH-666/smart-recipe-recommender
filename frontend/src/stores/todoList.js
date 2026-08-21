@@ -1,9 +1,9 @@
 import { defineStore } from 'pinia'
 import { ref, computed, watch } from 'vue'
 
-const STORAGE_KEY = 'recipe_cart'
+const STORAGE_KEY = 'todo_recipes'
 
-function loadCart() {
+function loadTodo() {
   try {
     return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]')
   } catch {
@@ -12,20 +12,20 @@ function loadCart() {
 }
 
 /**
- * 选菜组合（菜谱合集）—— 收集若干菜谱后一键生成套餐。
- * 与「收藏」「待做清单」语义互相独立：这里是"要用来拼套餐的菜"。
- * 持久化到 localStorage，刷新不丢失。
+ * 待做清单 —— 独立的"近期打算做"清单（区别于"菜谱合集/一键生成套餐"）。
+ * 语义：把下一顿 / 明天 / 后天想做的菜暂存于此，提醒自己近期动手；临近吃饭时再挑。
+ * 与收藏、选菜合集相互独立，各自持久化到 localStorage。
  */
-export const useRecipeCartStore = defineStore('recipeCart', () => {
-  const items = ref(loadCart())
+export const useTodoListStore = defineStore('todoList', () => {
+  const items = ref(loadTodo())
   const count = computed(() => items.value.length)
 
-  function inCart(id) {
+  function inTodo(id) {
     return items.value.some((i) => i.id === id)
   }
 
-  // 加购/取消：重复点击同一个菜谱即从购物车移除
-  function toggle(recipe) {
+  // 加入/移出待做：重复点击同一菜谱即从待做移除
+  function toggleTodo(recipe) {
     if (!recipe || !recipe.id) return
     const idx = items.value.findIndex((i) => i.id === recipe.id)
     if (idx >= 0) {
@@ -35,6 +35,7 @@ export const useRecipeCartStore = defineStore('recipeCart', () => {
         id: recipe.id,
         title: recipe.title,
         cover_image_url: recipe.cover_image_url,
+        added_at: Date.now(),
       })
     }
   }
@@ -53,5 +54,5 @@ export const useRecipeCartStore = defineStore('recipeCart', () => {
     { deep: true }
   )
 
-  return { items, count, inCart, toggle, remove, clear }
+  return { items, count, inTodo, toggleTodo, remove, clear }
 })

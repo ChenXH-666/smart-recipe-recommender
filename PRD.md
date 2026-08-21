@@ -68,7 +68,7 @@
 | LLM 服务 | 默认 SiliconFlow DeepSeek-R1-0528-Qwen3-8B；可经环境变量切换小米 Mimo mimo-v2.5（可关闭思考模式） |
 | Embedding 服务 | SiliconFlow BAAI/bge-m3（1024 维，多语言） |
 | 认证方案 | JWT（python-jose）+ bcrypt 密码哈希 |
-| 流式协议 | SSE（Server-Sent Events，sse-starlette） |
+| 流式协议 | SSE（Server-Sent Events，FastAPI `StreamingResponse` 手动实现；`data` 帧 + `[DONE]` 结束标记，会话 ID 走 `X-Conversation-Id` 响应头） |
 
 ### 1.5 名词术语
 
@@ -173,7 +173,8 @@
 | FR-U07 | 我的菜谱 | 展示我创建的菜谱（含 pending/rejected 状态与驳回意见），支持编辑/删除/重新提交 | P1 |
 | FR-U08 | 我的套餐 | 展示我创建的套餐（含审核状态），支持编辑/删除 | P1 |
 | FR-U09 | 饮食偏好设置 | 设置偏好菜系（cuisines）与忌口/过敏标签（diet_tags，JSON 持久化），用于过滤与推荐 | P1 |
-| FR-U10 | 菜谱购物车 | 浏览菜谱时可"加购"，购物车持久化（localStorage），一键生成套餐 | P2 |
+| FR-U10 | 菜谱合集（购物车） | 浏览菜谱时可收集进"菜谱合集"，持久化到 localStorage，一键基于合集生成套餐 | P2 |
+| FR-U11 | 待做清单 | 与收藏、菜谱合集语义独立的"近期要做"清单；菜谱卡片可一键加入，个人中心页集中查看/移除（localStorage 持久化） | P2 |
 
 #### 2.3.2 互动模块（FR-INTERACT）
 
@@ -442,38 +443,51 @@
 请求 → CORS 中间件 → 路由匹配 → 依赖注入（鉴权） → 路由处理函数 → 响应
 ```
 
-### 5.4 RAG 检索流程
+### 5.4 RAG 检索流程（对话场景）
 
 ```
-用户查询
+用户查询（AI 对话入口）
    │
    ▼
-┌─────────────────┐
-│ Embedding 向量化 │  SiliconFlow BGE-M3 (1024维)
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│ Chroma 相似度检索│  Top-K=5，可按 source_type 过滤
-└────────┬────────┘
-         │
-         ├─成功─→ 返回相关文档块
-         │
-         └─失败─→ 降级：metadata 关键词 n-gram 评分排序
-                   （标题 +3.0 / 标签 +1.5 / 正文 +0.8 / 2-3字gram +0.3~0.6）
-         │
-         ▼
-┌─────────────────┐
-│  拼接上下文 Prompt│
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│  LLM 流式生成    │  DeepSeek-R1-0528-Qwen3-8B
-└────────┬────────┘
-         │
-         ▼
-   SSE 推送前端
+┌─────────────────────┐
+│ Embedding 向量化     │ SiliconFlow BGE-M3 (1024维)
+└─────────┬───────────┘
+          │
+          ▼
+┌─────────────────────┐
+│ Chroma 余弦相似度检索 │ 召回较多候选分块（默认40），仅菜谱 source_type=recipe
+└─────────┬───────────┘
+          │
+          ├─失败/无结果 ─→ 降级：拉取元数据+原文，关键词 n-gram 评分排序
+          │              （整词：标题+3.0/标签+1.5/正文+0.8；2-3字gram：标题0.6/标签0.3/正文0.15）
+          │
+          ▼
+┌─────────────────────┐
+│ 按 source_id 去重     │
+└─────────┬───────────┘
+          │ 候选过少 → 热门菜谱补齐（按收藏/浏览降序，保证非空）
+          ▼
+┌─────────────────────┐
+│ 忌口过滤前置          │ 硬性剔除触忌口菜谱；全部触忌口→放宽并备注（为他人做菜时不硬拦）
+└─────────┬───────────┘
+          │
+          ▼
+┌─────────────────────┐
+│ 预算感知排序          │ 识别预算→预算内菜品靠前，注入"尽量用足预算(90%~100%)"提示
+└─────────┬───────────┘
+          │
+          ▼
+┌─────────────────────┐
+│ 紧凑候选池            │ 菜名/预估成本/食材/标签/短简介，去重后上限12道
+└─────────┬───────────┘
+          │ 动态内容置于请求尾部；静态系统提示词作稳定前缀（利于缓存）
+          ▼
+┌─────────────────────┐
+│ LLM 流式生成         │ DeepSeek-R1-0528-Qwen3-8B
+└─────────┬───────────┘
+          │
+          ▼
+   SSE 推送前端（data 帧 + [DONE]，会话ID走 X-Conversation-Id 头）
 ```
 
 ### 5.5 文档分块与同步策略
@@ -790,12 +804,15 @@
 | DB_NAME | recipe_system | 数据库名 |
 | JWT_SECRET_KEY | （占位） | 生产环境必须替换 |
 | JWT_ACCESS_TOKEN_EXPIRE_MINUTES | 1440 | 24 小时 |
-| CHROMA_PERSIST_DIR | ./chroma_db | 向量库持久化目录 |
+| CHROMA_PERSIST_DIR | F:/chroma_db | 向量库持久化目录（纯ASCII路径，避免Windows中文路径问题） |
 | EMBEDDING_MODEL | BAAI/bge-m3 | 1024 维多语言 |
-| LLM_MODEL | deepseek-ai/DeepSeek-R1-0528-Qwen3-8B | 支持思考链 |
+| LLM_MODEL | deepseek-ai/DeepSeek-R1-0528-Qwen3-8B | 支持思考链；可切小米 Mimo |
 | LLM_TEMPERATURE | 0.7 | 平衡创造性与稳定性 |
-| LLM_MAX_TOKENS | 2048 | 单次回复上限 |
-| RAG_TOP_K | 5 | 检索返回文档块数 |
+| LLM_MAX_TOKENS | 4096 | 单次回复上限（≥4096，避免完整菜单被截断） |
+| LLM_DISABLE_THINKING | False | 关闭 MiMo 等默认深度思考（reasoning_content） |
+| RAG_TOP_K | 5 | 基础检索返回文档块数 |
+| RAG_CHAT_RECALL_K | 40 | 对话RAG向量召回候选分块数（召回率优先） |
+| RAG_CHAT_MAX_DISHES | 12 | 去重后喂给模型的菜谱上限 |
 | RAG_CHUNK_SIZE | 500 | 分块字符数 |
 | RAG_CHUNK_OVERLAP | 50 | 相邻块重叠 |
 | RAG_EMBEDDING_BATCH_SIZE | 64 | 单次 Embedding 批次 |

@@ -9,12 +9,20 @@
         {{ difficultyMap[recipe.difficulty] || recipe.difficulty }}
       </div>
       <div
+        class="todo-btn"
+        :class="{ active: todoItems.some((i) => i.id === recipe.id) }"
+        :title="todoItems.some((i) => i.id === recipe.id) ? '已加入待做，点击移除' : '加入待做（近期打算做）'"
+        @click.stop.prevent="todo.toggleTodo(recipe)"
+      >
+        <el-icon :size="18"><Timer /></el-icon>
+      </div>
+      <div
         class="cart-btn"
         :class="{ active: cartItems.some((i) => i.id === recipe.id) }"
-        :title="cartItems.some((i) => i.id === recipe.id) ? '已在合集，点击移除' : '加入菜谱合集'"
-        @click.stop="cart.toggle(recipe)"
+        :title="cartItems.some((i) => i.id === recipe.id) ? '已加入菜谱合集，点击移除' : '加入菜谱合集（一键生成套餐）'"
+        @click.stop.prevent="cart.toggle(recipe)"
       >
-        <el-icon :size="16"><ShoppingCart /></el-icon>
+        <el-icon :size="18"><Collection /></el-icon>
       </div>
     </div>
     <div class="card-body">
@@ -51,6 +59,7 @@
 import { computed } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useRecipeCartStore } from '../stores/recipeCart'
+import { useTodoListStore } from '../stores/todoList'
 
 /**
  * RecipeCard 组件
@@ -70,6 +79,8 @@ const props = defineProps({
 // 菜谱购物车（storeToRefs 保持响应式，避免解包后状态不刷新）
 const cart = useRecipeCartStore()
 const { items: cartItems } = storeToRefs(cart)
+const todo = useTodoListStore()
+const { items: todoItems } = storeToRefs(todo)
 
 const difficultyMap = { easy: '简单', medium: '中等', hard: '困难' }
 
@@ -125,12 +136,12 @@ const displayImageUrl = computed(() => {
   transition: transform 0.3s;
 }
 
+.todo-btn,
 .cart-btn {
   position: absolute;
-  top: 12px;
-  right: 12px;
-  width: 30px;
-  height: 30px;
+  top: 8px;
+  width: 36px;
+  height: 36px;
   border-radius: 50%;
   background: rgba(255, 255, 255, 0.92);
   color: #6b7280;
@@ -143,14 +154,17 @@ const displayImageUrl = computed(() => {
   /* 确保不被图片/占位图等盖住，且只响应按钮自身点击 */
   z-index: 5;
   pointer-events: auto;
+  /* 移动端触控目标足够大，便于手指点中 */
+  border: 2px solid transparent;
+  background-clip: padding-box;
 }
+.todo-btn { right: 52px; }
+.cart-btn { right: 8px; }
+.todo-btn > *,
 .cart-btn > * {
   pointer-events: none;
 }
-.cart-btn:hover {
-  background: #2563eb;
-  color: #fff;
-}
+.todo-btn.active,
 .cart-btn.active {
   background: #2563eb;
   color: #fff;
