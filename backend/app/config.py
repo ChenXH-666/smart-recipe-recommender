@@ -25,6 +25,8 @@
   RAG_CHECKPOINT_FILE = "./chroma_db/rebuild_checkpoint.json" → 全量重建向量库时的断点文件，记录已成功的文档 ID
 """
 
+import os
+
 from pydantic_settings import BaseSettings
 from functools import lru_cache
 
@@ -94,7 +96,10 @@ class Settings(BaseSettings):
     LLM_API_KEY: str = ""  # 必须通过 .env 注入，禁止硬编码
     LLM_BASE_URL: str = "https://api.siliconflow.cn/v1"
     LLM_TEMPERATURE: float = 0.7  # 0.7 平衡创造性与稳定性
-    LLM_MAX_TOKENS: int = 2048
+    LLM_MAX_TOKENS: int = 4096  # 至少 4096，避免完整菜单/做法输出被截断
+    # 是否关闭模型思考模式：部分模型（如 MiMo mimo-v2.5 / mimo-v2.5-pro）默认开启
+    # 深度思考（输出 reasoning_content 推理链）。设为 true 时在请求体传 thinking.type=disabled
+    LLM_DISABLE_THINKING: bool = False
 
     # 菜谱封面图白名单域名（仅允许专业美食网站，符合项目硬约束）
     RECIPE_COVER_WHITELIST: str = "meishichina.com,xiachufang.com,douguo.com,xiangha.com"
@@ -115,11 +120,17 @@ class Settings(BaseSettings):
     RAG_TOP_K: int = 5                       # 检索返回的文档块数量
     RAG_CHUNK_SIZE: int = 500                # 文档分块大小（字符数）
     RAG_CHUNK_OVERLAP: int = 50              # 相邻块重叠字符数
+    # 对话 RAG：先召回较多候选分块，按菜谱(source_id)去重，再取前 N 道。
+    # 提高单轮信息密度（同等 token 塞进更多不重复的真实菜谱），避免模型编造。
+    RAG_CHAT_RECALL_K: int = 40              # 向量召回候选分块数（召回率优先）
+    RAG_CHAT_MAX_DISHES: int = 12            # 最终喂给模型的去重菜谱上限
     RAG_EMBEDDING_BATCH_SIZE: int = 64       # Embedding API 单次请求最大文本数
     RAG_CHECKPOINT_FILE: str = "./chroma_db/rebuild_checkpoint.json"  # 重建断点文件路径
 
     class Config:
-        env_file = ".env"
+        # 通过环境变量 ENV_FILE 切换配置文件（如 set ENV_FILE=.env-mimo）
+        # 未设置时默认使用 .env（SiliconFlow）
+        env_file = os.getenv("ENV_FILE", ".env")
         env_file_encoding = "utf-8"
 
 

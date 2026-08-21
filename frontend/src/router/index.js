@@ -26,6 +26,8 @@ const routes = [
     component: () => import('../layouts/MainLayout.vue'),
     children: [
       { path: '', name: 'Home', component: () => import('../views/Home.vue') },
+      { path: 'for-you', name: 'ForYou', component: () => import('../views/ForYouRecipes.vue') },
+      { path: 'hot-recipes', name: 'HotRecipes', component: () => import('../views/HotRecipes.vue') },
       { path: 'recipes', name: 'Recipes', component: () => import('../views/RecipeList.vue') },
       { path: 'recipes/create', name: 'RecipeCreate', component: () => import('../views/RecipeCreate.vue'), meta: { requiresAuth: true } },
       { path: 'recipes/:id', name: 'RecipeDetail', component: () => import('../views/RecipeDetail.vue') },

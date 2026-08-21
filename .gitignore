@@ -15,6 +15,7 @@ image/
 
 # Environment & Config
 backend/.env
+backend/.env-mimo
 backend/.env.*
 !backend/.env.example
 backend/config.local.py

@@ -20,6 +20,7 @@ from app.schemas.ai import AiChatRequest, RewindEditRequest
 from app.schemas.common import SuccessResponse
 from app.core.deps import get_current_user
 from app.services.ai_service import chat_stream, load_memory_from_db, clear_memory
+from app.utils.recipe_diet import get_restriction_set
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -83,10 +84,18 @@ async def ai_chat(
         db.commit()
 
     # 流式响应：生成器内部创建独立 session，避免依赖注入 session 被提前关闭
+    # 忌口过滤：将当前用户忌口标签传入，供 RAG 候选剔除触忌口的菜谱
+    restriction_set = get_restriction_set(current_user)
+
     async def event_stream():
         full_response = ""
         try:
-            async for chunk in chat_stream(data.message, conversation_id):
+            async for chunk in chat_stream(
+                data.message,
+                conversation_id,
+                db=db,
+                restriction_set=restriction_set,
+            ):
                 full_response += chunk
                 # SSE 格式：对内容做 JSON 编码防止换行破坏协议
                 yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"

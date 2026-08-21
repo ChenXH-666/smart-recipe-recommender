@@ -11,7 +11,9 @@ export default defineConfig({
     }
   },
   server: {
+    host: '0.0.0.0',      // 监听全部网卡，允许局域网访问
     port: 3000,
+    allowedHosts: true,   // 开发环境放行ngrok随机域名，解决Blocked报错
     proxy: {
       '/api': {
         target: 'http://localhost:8000',

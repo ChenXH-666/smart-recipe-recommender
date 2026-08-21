@@ -140,6 +140,12 @@ const displayImageUrl = computed(() => {
   cursor: pointer;
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.16);
   transition: all 0.2s;
+  /* 确保不被图片/占位图等盖住，且只响应按钮自身点击 */
+  z-index: 5;
+  pointer-events: auto;
+}
+.cart-btn > * {
+  pointer-events: none;
 }
 .cart-btn:hover {
   background: #2563eb;

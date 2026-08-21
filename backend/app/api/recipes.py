@@ -10,7 +10,7 @@
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import and_, or_, func, desc, asc, update
+from sqlalchemy import and_, or_, func, desc, asc, update, case
 from datetime import datetime, timedelta
 
 from app.database import get_db
@@ -32,7 +32,7 @@ router = APIRouter()
 DEFAULT_COVER = "/static/recipe_covers/default.jpg"
 
 # 允许的排序字段白名单，防止 SQL 注入风险
-_ALLOWED_SORT_FIELDS = {"created_at", "estimated_cost", "view_count", "favorite_count"}
+_ALLOWED_SORT_FIELDS = {"created_at", "estimated_cost", "view_count", "favorite_count", "difficulty"}
 # 公开列表允许的 status 值
 _PUBLIC_STATUS = "approved"
 
@@ -150,13 +150,13 @@ def _record_browse_history(db: Session, user_id: int | None, recipe_id: int):
 @router.get("", response_model=PaginatedResponse[RecipeListItem])
 def list_recipes(
     keyword: str = Query(None, description="搜索关键词", max_length=200),
-    difficulty: str = Query(None, description="难度筛选：easy/medium/hard"),
+    difficulty: str = Query(None, description="难度筛选：easy/medium/hard，支持逗号分隔多选，如 easy,medium"),
     tag_ids: str = Query(None, description="标签ID，逗号分隔"),
     min_cost: float = Query(None, description="最低预算", ge=0),
     max_cost: float = Query(None, description="最高预算", ge=0),
     sort_by: str = Query(
         "created_at",
-        description="排序字段：created_at(时间) / estimated_cost(价格) / view_count / favorite_count",
+        description="排序字段：created_at(时间) / estimated_cost(价格) / view_count / favorite_count / difficulty(难度)",
     ),
     sort_order: str = Query(
         "desc",
@@ -200,9 +200,13 @@ def list_recipes(
             Recipe.status == _PUBLIC_STATUS,
         )
 
-    # difficulty 枚举校验
-    if difficulty and difficulty not in ("easy", "medium", "hard"):
-        raise HTTPException(status_code=400, detail="difficulty 必须为 easy/medium/hard")
+    # difficulty 枚举校验（支持逗号分隔多选）
+    difficulty_list = []
+    if difficulty:
+        difficulty_list = [d for d in difficulty.split(",") if d]
+        diff_ids = ("easy", "medium", "hard")
+        if not all(d in diff_ids for d in difficulty_list):
+            raise HTTPException(status_code=400, detail="difficulty 必须为 easy/medium/hard 之一，逗号分隔")
 
     if keyword:
         query = query.filter(
@@ -211,8 +215,8 @@ def list_recipes(
                 Recipe.description.contains(keyword),
             )
         )
-    if difficulty:
-        query = query.filter(Recipe.difficulty == difficulty)
+    if difficulty_list:
+        query = query.filter(Recipe.difficulty.in_(difficulty_list))
     if min_cost is not None:
         query = query.filter(Recipe.estimated_cost >= min_cost)
     if max_cost is not None:
@@ -225,7 +229,15 @@ def list_recipes(
     # 排序字段白名单，防止任意字段排序
     sort_by = sort_by if sort_by in _ALLOWED_SORT_FIELDS else "created_at"
     sort_order = sort_order if sort_order in ("asc", "desc") else "desc"
-    sort_column = getattr(Recipe, sort_by)
+    if sort_by == "difficulty":
+        # 难度按 easy/medium/hard 权重排序（字符串字典序为 easy<hard<medium，不符合直觉）
+        sort_column = case(
+            (Recipe.difficulty == "easy", 0),
+            (Recipe.difficulty == "medium", 1),
+            else_=2,
+        )
+    else:
+        sort_column = getattr(Recipe, sort_by)
     query = query.order_by(desc(sort_column) if sort_order == "desc" else asc(sort_column))
 
     total = query.count()

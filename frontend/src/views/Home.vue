@@ -32,8 +32,8 @@
       </template>
     </el-alert>
 
-    <div class="stat-row">
-      <div class="stat-card stat-blue">
+    <div class="stat-row" :class="{ 'three-col': userStore.isAdmin }">
+      <div class="stat-card stat-blue" @click="$router.push('/recipes')">
         <div class="stat-icon">
           <el-icon :size="28"><DishDot /></el-icon>
         </div>
@@ -43,7 +43,7 @@
           <small v-if="stats.new_recipes_week" class="stat-sub">本周新增 {{ stats.new_recipes_week }}</small>
         </div>
       </div>
-      <div class="stat-card stat-green">
+      <div class="stat-card stat-green" @click="$router.push('/meal-plans')">
         <div class="stat-icon">
           <el-icon :size="28"><Collection /></el-icon>
         </div>
@@ -53,7 +53,7 @@
           <small v-if="stats.new_meal_plans_week" class="stat-sub">本周新增 {{ stats.new_meal_plans_week }}</small>
         </div>
       </div>
-      <div class="stat-card stat-orange">
+      <div v-if="userStore.isAdmin" class="stat-card stat-orange">
         <div class="stat-icon">
           <el-icon :size="28"><User /></el-icon>
         </div>
@@ -65,37 +65,37 @@
       </div>
     </div>
 
-    <el-card class="section-card" v-if="userStore.isLoggedIn && personalizedItems.length">
-      <template #header>
-        <div class="section-title">
-          <div>
-            <h3>为你推荐</h3>
-            <p>基于您的浏览历史和收藏偏好</p>
-          </div>
+    <div class="recipe-scroll" v-if="userStore.isLoggedIn && personalizedItems.length">
+      <div class="scroll-header">
+        <div>
+          <h3>为你推荐</h3>
+          <p>基于您的浏览历史和收藏偏好</p>
         </div>
-      </template>
-      <div class="recipe-grid">
+        <el-button type="primary" plain @click="$router.push('/for-you')">
+          查看更多
+          <el-icon><ArrowRight /></el-icon>
+        </el-button>
+      </div>
+      <div class="scroll-row">
         <RecipeCard v-for="item in personalizedItems" :key="item.id" :recipe="item" />
       </div>
-    </el-card>
+    </div>
 
-    <el-card class="section-card">
-      <template #header>
-        <div class="section-title">
-          <div>
-            <h3>热门菜谱</h3>
-            <p>本周最受欢迎的菜谱</p>
-          </div>
-          <el-button type="primary" plain @click="$router.push('/recipes')">
-            查看更多
-            <el-icon><ArrowRight /></el-icon>
-          </el-button>
+    <div class="recipe-scroll">
+      <div class="scroll-header">
+        <div>
+          <h3>热门菜谱</h3>
+          <p>本周最受欢迎的菜谱</p>
         </div>
-      </template>
-      <div class="recipe-grid">
+        <el-button type="primary" plain @click="$router.push('/hot-recipes')">
+          查看更多
+          <el-icon><ArrowRight /></el-icon>
+        </el-button>
+      </div>
+      <div class="scroll-row">
         <RecipeCard v-for="item in hotRecipes" :key="item.id" :recipe="item" />
       </div>
-    </el-card>
+    </div>
 
     <el-card class="section-card">
       <template #header>
@@ -251,9 +251,14 @@ onMounted(loadData)
 
 .stat-row {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(2, 1fr);
   gap: 16px;
   margin-bottom: 20px;
+}
+
+/* 管理员显示三张卡（菜谱/套餐/用户）时平分为三列；非管理员两卡各占一半 */
+.stat-row.three-col {
+  grid-template-columns: repeat(3, 1fr);
 }
 
 .diet-banner {
@@ -311,6 +316,7 @@ onMounted(loadData)
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
   border: 1px solid #f0f0f0;
   transition: all 0.2s;
+  cursor: pointer;
 }
 
 .stat-card:hover {
@@ -381,6 +387,46 @@ onMounted(loadData)
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
   gap: 16px;
+}
+
+/* 横向单行滑动区（为你推荐 / 热门菜谱） */
+.recipe-scroll {
+  background: #fff;
+  border-radius: 8px;
+  border: 1px solid #ebeef5;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  margin-bottom: 16px;
+  padding: 20px 20px 12px;
+}
+.scroll-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+.scroll-header h3 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: #1f2937;
+}
+.scroll-header p {
+  margin: 4px 0 0;
+  font-size: 13px;
+  color: #909399;
+}
+.scroll-row {
+  display: flex;
+  gap: 16px;
+  overflow-x: auto;
+  padding-bottom: 8px;
+  scrollbar-width: none;
+}
+.scroll-row::-webkit-scrollbar {
+  display: none;
+}
+.scroll-row :deep(.recipe-card) {
+  flex: 0 0 240px;
 }
 
 .plan-grid {

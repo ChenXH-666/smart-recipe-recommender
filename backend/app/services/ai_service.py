@@ -44,7 +44,7 @@ from langchain_classic.memory import ConversationBufferMemory
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 from app.config import get_settings
-from app.services.rag_service import rag_search
+from app.services.rag_service import rag_search, build_recipe_pool_context
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -102,6 +102,12 @@ def _get_llm():
         kwargs["openai_api_key"] = settings.LLM_API_KEY
     if settings.LLM_BASE_URL:
         kwargs["openai_api_base"] = settings.LLM_BASE_URL
+    if settings.LLM_PROVIDER == "mimo":
+        # MiMo mimo-v2.5 / mimo-v2.5-pro 默认开启深度思考（返回 reasoning_content 推理链）。
+        # 这里自动关闭，只返回最终答案。注意：thinking 是 MiMo 非标准 OpenAI 参数，
+        # 必须走 extra_body（用 model_kwargs 会被当成 create() 顶层参数，触发 TypeError）。
+        # 该分支仅当 LLM_PROVIDER=mimo 时生效，切换回 SiliconFlow 天然不会误传。
+        kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
 
     return ChatOpenAI(**kwargs)
 
@@ -126,22 +132,36 @@ def clear_memory(conversation_id: int):
 
 
 # 系统提示词 —— 控制 AI 的角色行为和回答风格
-SYSTEM_PROMPT = """你是一个友好的AI烹饪助手，专门为用户提供菜谱推荐、烹饪建议和饮食规划。
+# ⚠ 缓存友好设计：此提示词必须保持【完全静态、逐字节一致】，不得插入任何
+#   动态内容（时间、随机文本、RAG 上下文等）。动态内容一律放到请求末尾的
+#   用户消息里，从而保证本段成为稳定前缀，最大化 LLM 提供商的提示词缓存命中率，
+#   降低单轮对话的输入成本。
+SYSTEM_PROMPT = """你是"食慧家"智能菜谱推荐助手，只推荐系统菜谱库中真实存在的菜谱，为用户提供菜谱推荐、烹饪建议、预算规划和膳食搭配。
 
-你的能力包括：
-1. 根据用户的需求推荐合适的菜谱
-2. 提供烹饪技巧和食材替代建议
-3. 帮助用户规划健康合理的膳食搭配
-4. 根据预算推荐经济实惠的菜品组合
+【强制性规则 —— 必须逐条遵守】
+1. 只能推荐"参考资料"中出现的菜谱，严禁编造或推荐参考资料之外的菜名。
+2. 每一道菜的食材、做法、预估成本必须严格依据参考资料标注的内容，
+   不得自行改写用料、杜撰价格或篡改做法。
+3. 回答中出现的任何菜名、食材、价格、步骤，都必须能在参考资料中找到对应依据。
+4. 若参考资料不足、检索不到相关菜谱、或无法满足用户需求时，
+   如实说明"当前菜谱库中没有符合条件的菜品"，绝不硬凑或虚构。
+5. 涉及预算时，只按参考资料的"预估成本"逐道累计，给出总价并提示是否在预算内；
+   不要自己估算没有依据的菜价。在不超过预算的前提下，应尽量"用足预算"：
+   通常应使总价达到预算的约 90%~100%，办法是增加菜品数量或选择库内成本更高的
+   合理搭配来让菜单更丰盛，避免出现"预算很大却只用了很少"的空泛组合；
+   若确实无法逼近预算，应在总价旁说明原因。
 
-回答要求：
+【能力】
+- 根据用户需求推荐合适的菜谱
+- 提供烹饪技巧和食材替代建议
+- 帮助用户规划健康合理的膳食搭配
+- 根据预算推荐经济实惠的菜品组合
+
+【回答要求】
 - 使用中文回复
 - 回答要简洁实用，条理清晰
 - 推荐菜谱时说明原因和特点
-- 如涉及预算，明确列出每道菜的成本
-- 以友好、热情的语气与用户交流
-
-{context}"""
+- 以友好、热情的语气与用户交流"""
 
 
 def _build_context_from_rag(search_results: List[Dict]) -> str:
@@ -157,45 +177,85 @@ def _build_context_from_rag(search_results: List[Dict]) -> str:
     return "\n".join(parts)
 
 
+# 判断用户是否在为"他人"做菜 —— 此时不应硬性按用户本人忌口拦截
+# 启发式匹配，覆盖常见表达；命中说明意图是为别人下厨/请客/招待。
+_FOR_OTHERS_PATTERNS = [
+    "给别人", "给朋友", "为朋友", "给同事", "做给",
+    "给父母", "给爸妈", "给老人", "给长辈",
+    "给小孩", "给孩子", "给小朋友",
+    "给爷爷奶奶", "请客", "招待", "宴请",
+    "客人", "朋友来做", "来家里吃饭", "来家里做客",
+]
+
+
+def _is_cooking_for_others(message: str) -> bool:
+    """粗略判断用户是否在为他人做菜（命中任一模式即视为是）"""
+    m = message or ""
+    return any(p in m for p in _FOR_OTHERS_PATTERNS)
+
+
 async def chat_stream(
     message: str,
     conversation_id: int,
     use_rag: bool = True,
+    db=None,
+    restriction_set=None,
 ) -> AsyncGenerator[str, None]:
     """
     流式 AI 对话 —— 核心异步生成器。
 
     执行流程：
       1. 获取 LLM 实例和对话记忆
-      2. （可选）RAG 检索相关菜谱/心得
-      3. 构建消息列表：[SystemPrompt + 历史消息(最近10轮) + 当前用户消息]
+      2. （可选）RAG 检索相关菜谱，按菜谱去重 + 剔除用户忌口后构建候选池上下文
+      3. 构建消息列表：[SystemPrompt(静态前缀) + 历史消息(最近10轮) + 当前用户消息(含上下文尾部)]
       4. 调用 llm.astream() 流式生成，逐 token yield
       5. 流式结束后，将完整对话保存到 memory
 
     设计考量：
       - 只保留最近 10 轮历史，避免 context 窗口溢出和 token 浪费
+      - 系统提示词保持静态稳定前缀以便提示词缓存命中；动态内容放用户消息尾部
       - RAG 失败不影响主流程，降级为纯 LLM 回答
+      - restriction_set：当前用户忌口标签集合，RAG 候选会先被程序剔除触忌口的菜谱
+      - db：用于加载候选菜谱与忌口过滤；为空时退回旧的分块拼接逻辑
       - 流式输出时逐字符 yield，前端实现打字机效果
     """
     llm = _get_llm()
     memory = _get_or_create_memory(conversation_id)
 
-    # RAG 检索 —— 从向量库获取相关菜谱/心得作为参考上下文
+    # RAG 检索 —— 召回较多候选，按菜谱去重并剔除用户忌口后，输出紧凑候选池
+    # 若用户在为他人做菜（消息命中"给…/请客/招待"等表达），不硬性拦截其本人忌口
     context = ""
-    if use_rag:
-        search_results = rag_search(message, top_k=5)
+    if use_rag and db is not None:
+        context = build_recipe_pool_context(
+            db,
+            message,
+            restriction_set=restriction_set,
+            relax_restriction=_is_cooking_for_others(message),
+        )
+    elif use_rag:
+        # 兜底：无 db 时退回旧的分块拼接（仅测试/异常场景）
+        search_results = rag_search(message, top_k=settings.RAG_TOP_K * 2)
         context = _build_context_from_rag(search_results)
 
-    # 构建消息列表
-    system_prompt = SYSTEM_PROMPT.format(context=context)
-    messages = [SystemMessage(content=system_prompt)]
+    # 构建消息列表 —— 缓存友好顺序：
+    #   系统提示词（完全静态、稳定前缀）→ 历史 → 动态内容（RAG 上下文 + 用户问题）
+    #   动态内容全部放末尾，保证稳定前缀逐字节一致，最大化提示词缓存命中率
+    messages = [SystemMessage(content=SYSTEM_PROMPT)]
 
     # 添加历史对话（截断最近10轮，避免 token 浪费）
     history = memory.chat_memory.messages
     messages.extend(history[-10:])
 
-    # 添加当前用户消息
-    messages.append(HumanMessage(content=message))
+    # 当前用户消息；RAG 上下文并入用户消息尾部（若检索到结果）
+    user_content = message
+    if context:
+        user_content = (
+            "参考资料（菜谱库检索结果，请只基于这些资料推荐，"
+            "食材、做法、价格均以此为准，不要在资料之外编造菜品）：\n\n"
+            f"{context}\n\n"
+            f"用户问题：{message}"
+        )
+    messages.append(HumanMessage(content=user_content))
 
     # 流式输出
     full_response = ""

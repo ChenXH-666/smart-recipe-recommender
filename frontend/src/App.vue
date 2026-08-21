@@ -268,6 +268,12 @@ h1, h2, h3, h4, h5, h6 {
     padding: 12px 16px 14px;
   }
 
+  /* 确认弹窗（el-message-box）：窄屏下避免固定在 420px 导致右侧超出 */
+  .el-message-box {
+    width: calc(100vw - 32px) !important;
+    max-width: 100%;
+  }
+
   /* 抽屉：窄屏下全宽 */
   .el-drawer {
     width: 100% !important;
@@ -293,6 +299,13 @@ h1, h2, h3, h4, h5, h6 {
     flex-wrap: wrap;
     justify-content: center;
     gap: 4px;
+  }
+
+  /* 输入控件字号 ≥16px：避免 iOS 聚焦时自动放大页面（影响体验） */
+  input,
+  textarea,
+  select {
+    font-size: 16px !important;
   }
 }
 </style>

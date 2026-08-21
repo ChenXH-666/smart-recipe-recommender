@@ -18,18 +18,21 @@
             <el-icon><Search /></el-icon>
           </template>
         </el-input>
-        <el-select v-model="difficulty" placeholder="难度" clearable style="width: 120px">
+        <el-select v-model="difficulty" placeholder="难度" multiple clearable style="width: 160px">
           <el-option label="简单" value="easy" />
           <el-option label="中等" value="medium" />
           <el-option label="困难" value="hard" />
         </el-select>
         <el-input-number v-model="minCost" :min="0" :step="10" placeholder="最低预算" controls-position="right" style="width: 160px" />
         <el-input-number v-model="maxCost" :min="0" :step="10" placeholder="最高预算" controls-position="right" style="width: 160px" />
-        <el-select v-model="sortBy" placeholder="排序" clearable style="width: 140px">
-          <el-option label="时间从新到旧" value="created_at_desc" />
-          <el-option label="时间从旧到新" value="created_at_asc" />
-          <el-option label="价格从低到高" value="estimated_cost_asc" />
-          <el-option label="价格从高到低" value="estimated_cost_desc" />
+        <el-select v-model="sortField" placeholder="排序字段" style="width: 110px">
+          <el-option label="时间" value="created_at" />
+          <el-option label="价格" value="estimated_cost" />
+          <el-option label="难度" value="difficulty" />
+        </el-select>
+        <el-select v-model="sortOrder" placeholder="方向" style="width: 90px">
+          <el-option label="升序" value="asc" />
+          <el-option label="降序" value="desc" />
         </el-select>
         <el-button type="primary" @click="search">
           <el-icon><Search /></el-icon>
@@ -101,10 +104,11 @@ const total = ref(0)
 const page = ref(1)
 const pageSize = 20
 const keyword = ref('')
-const difficulty = ref('')
+const difficulty = ref([])
 const minCost = ref(null)
 const maxCost = ref(null)
-const sortBy = ref('created_at_desc')
+const sortField = ref('created_at')
+const sortOrder = ref('desc')
 
 // RAG 智能搜索（自然语言语义检索）：结果直接展示在主列表，无弹窗
 const isAiMode = ref(false)
@@ -147,14 +151,12 @@ async function loadData() {
   try {
     const params = { page: page.value, page_size: pageSize }
     if (keyword.value) params.keyword = keyword.value
-    if (difficulty.value) params.difficulty = difficulty.value
+    if (difficulty.value && difficulty.value.length) params.difficulty = difficulty.value.join(',')
     if (minCost.value !== null && minCost.value > 0) params.min_cost = minCost.value
     if (maxCost.value !== null && maxCost.value > 0) params.max_cost = maxCost.value
-    if (sortBy.value) {
-      const parts = sortBy.value.split('_')
-      const order = parts.pop()
-      params.sort_by = parts.join('_')
-      params.sort_order = order
+    if (sortField.value) {
+      params.sort_by = sortField.value
+      params.sort_order = sortOrder.value
     }
     const res = await api.get('/recipes', { params })
     items.value = res.items || []
@@ -171,10 +173,11 @@ function search() {
 
 function resetFilters() {
   keyword.value = ''
-  difficulty.value = ''
+  difficulty.value = []
   minCost.value = null
   maxCost.value = null
-  sortBy.value = 'created_at_desc'
+  sortField.value = 'created_at'
+  sortOrder.value = 'desc'
   page.value = 1
   loadData()
 }
@@ -182,11 +185,14 @@ function resetFilters() {
 onMounted(() => {
   // 从 URL 查询参数中读取所有筛选条件，支持通过链接分享筛选状态
   if (route.query.keyword) keyword.value = route.query.keyword
-  if (route.query.difficulty) difficulty.value = route.query.difficulty
+  if (route.query.difficulty) {
+    difficulty.value = String(route.query.difficulty).split(',').filter(Boolean)
+  }
   if (route.query.min_cost) minCost.value = Number(route.query.min_cost)
   if (route.query.max_cost) maxCost.value = Number(route.query.max_cost)
   if (route.query.sort_by && route.query.sort_order) {
-    sortBy.value = route.query.sort_by + '_' + route.query.sort_order
+    sortField.value = route.query.sort_by
+    sortOrder.value = route.query.sort_order
   }
   loadData()
 })

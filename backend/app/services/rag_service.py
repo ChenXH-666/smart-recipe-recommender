@@ -42,10 +42,11 @@ RAG (Retrieval-Augmented Generation) 服务 —— 向量构建、语义检索�
 """
 
 import os
+import re
 import json
 import logging
 import requests
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Iterable
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.embeddings import Embeddings
@@ -210,6 +211,10 @@ def _build_recipe_text(recipe) -> str:
     parts = [f"菜谱：{recipe.title}"]
     if recipe.description:
         parts.append(f"简介：{recipe.description}")
+
+    # 预估成本 —— 确保 RAG 上下文携带真实价格，避免模型自行估白菜价
+    if getattr(recipe, "estimated_cost", None):
+        parts.append(f"预估成本：{recipe.estimated_cost}元")
 
     # 标签
     tags = [t.tag.name for t in recipe.tags] if hasattr(recipe, 'tags') and recipe.tags else []
@@ -493,6 +498,183 @@ def rag_search(query: str, top_k: int = None, filter_source_type: str = None) ->
     return results
 
 
+def _get_popular_recipe_ids(db, limit: int, exclude: Optional[Iterable[int]] = None) -> List[int]:
+    """兜底候选：取已上架、未删除的热门菜谱（按收藏/浏览量降序）"""
+    from app.models import Recipe
+    excluded = list(exclude or [])
+    q = db.query(Recipe.id).filter(
+        Recipe.status == "approved",
+        Recipe.is_deleted == 0,
+    )
+    if excluded:
+        q = q.filter(Recipe.id.notin_(excluded))
+    rows = q.order_by(
+        Recipe.favorite_count.desc(),
+        Recipe.view_count.desc(),
+    ).limit(limit).all()
+    return [r[0] for r in rows]
+
+
+# 预算解析：识别"预算500 / 500元左右 / 500块以内 / 大概500元"等表达
+_BUDGET_PATTERNS = [
+    re.compile(r"预算\s*[是约大概为][约大概]{0,2}\s*(\d+)\s*(?:元|块|rmb)?", re.I),
+    re.compile(r"(\d+)\s*(?:元|块)\s*(?:左右|上下|以[内下])"),
+    re.compile(r"(\d+)\s*(?:元|块)"),
+]
+
+
+def _extract_budget(text: str) -> Optional[int]:
+    """从用户消息中提取预算金额（元），解析不到返回 None"""
+    if not text:
+        return None
+    for pat in _BUDGET_PATTERNS:
+        m = pat.search(text)
+        if not m:
+            continue
+        try:
+            v = int(m.group(1))
+        except (TypeError, ValueError):
+            continue
+        if 0 < v < 100000:
+            return v
+    return None
+
+
+def build_recipe_pool_context(
+    db,
+    query: str,
+    max_dishes: int = None,
+    restriction_set=None,
+    relax_restriction: bool = False,
+) -> str:
+    """
+    为对话构建高信息密度的菜谱候选池上下文。
+
+    链路（对应优化点）：
+      ① 召回兜底：向量召回（按菜谱去重）后若为空/过少，用热门菜谱二次补齐，
+         保证任何查询都有库内菜品锚定，杜绝模型靠内部知识编造。
+      ② 预算感知：从消息中识别预算，预算内菜品排序靠前，并在上下文附预算提示，
+         让模型按真实成本排菜单、报总价。
+      ③ 永不空：召回 + 热门兜底 + 忌口全中时放宽，三重保证不带空上下文给模型。
+
+    紧凑格式（标题/成本/食材/标签/短简介）使同等 token 承载更多真实菜谱，
+    并避免粘贴冗长步骤。
+
+    忌口策略（restriction_set 若非空）：
+      - relax_restriction=False（默认，用户为自己做菜）：
+        * 先硬性剔除触忌口的菜谱；若候选全部触忌口，放宽到未过滤池并备注让模型如实说明。
+      - relax_restriction=True（用户在为他人做菜）：
+        * 不硬性拦截，仅把用户忌口作为参考信息给模型，以对方要求为准。
+    """
+    from app.utils.recipe_diet import filter_recipe_ids
+    from app.models import Recipe
+
+    if max_dishes is None:
+        max_dishes = settings.RAG_CHAT_MAX_DISHES
+    recall_k = settings.RAG_CHAT_RECALL_K
+
+    # ---- 1) 候选池：向量召回 + 热门兜底补足（①②）----
+    results = rag_search(query, top_k=recall_k, filter_source_type="recipe")
+    pool: List[int] = []
+    seen: set = set()
+    for r in results:
+        rid = r.get("source_id")
+        if rid and rid not in seen:
+            seen.add(rid)
+            pool.append(rid)
+    # 召回为空/过少 → 用热门菜谱补齐，保证有可锚定的库内菜
+    if len(pool) < max_dishes:
+        fill = _get_popular_recipe_ids(
+            db, limit=max_dishes + 16, exclude=set(pool)
+        )
+        for rid in fill:
+            if rid not in seen:
+                seen.add(rid)
+                pool.append(rid)
+            if len(pool) >= max_dishes + 8:  # 预留忌口过滤腾挪空间
+                break
+    if not pool:
+        return ""
+
+    # ---- 2) 忌口处理（③ + 为他人做菜放宽）----
+    notes: List[str] = []
+    restrict_list = sorted(restriction_set) if restriction_set else []
+    if restrict_list and not relax_restriction:
+        allowed_set = filter_recipe_ids(db, pool, restriction_set)
+        allowed = [rid for rid in pool if rid in allowed_set]
+        if allowed:
+            pool = allowed
+        else:
+            # 全部候选都触忌口 → 放宽避免空上下文，让模型如实告知
+            notes.append(
+                "注意：检索到的候选菜谱全部触碰用户忌口"
+                f"（{', '.join(restrict_list)}），为不让结果为空已临时放宽。"
+                "请优先如实指出这些菜存在用户忌口；若确实没有安全选择，应明确告知，不要硬推荐。"
+            )
+    elif restrict_list and relax_restriction:
+        notes.append(
+            "注意：用户本人已特意设置忌口/过敏"
+            f"（{', '.join(restrict_list)}），但当前用户是在为他人做菜，"
+            "目标对象可能并不忌口、甚至特好这一口，故本桌【不强制规避】该忌口项，仅作参考。"
+            "请在回复中明确承认你已注意到用户本人的这一忌口设置，"
+            "并解释因为是在为对象做菜、故未刻意按此忌口规避——不要只字不提，令用户误以为其设置被忽略。"
+        )
+    if not pool:
+        return ""
+
+    # ---- 3) 预算感知排序：预算内靠前，超预算靠后（②）----
+    budget = _extract_budget(query)
+    if budget is not None:
+        pre = {r.id: r for r in db.query(Recipe).filter(Recipe.id.in_(pool)).all()}
+
+        def _cost(rid: int) -> float:
+            r = pre.get(rid)
+            return float(r.estimated_cost) if r and r.estimated_cost else float("inf")
+
+        in_budget = sorted((rid for rid in pool if _cost(rid) <= budget), key=_cost)
+        over = sorted((rid for rid in pool if _cost(rid) > budget), key=_cost)
+        pool = in_budget + over
+        notes.append(
+            f"用户预算约为 {budget} 元。请在不超过预算的前提下尽量用足预算"
+            f"（总价建议达约 {int(budget * 0.9)}~{budget} 元），"
+            "可通过多选几道菜、或优先选用库内成本更高的合理搭配来丰盛菜单；"
+            "总价只依据上表标注的成本逐道累计，不要自估。"
+        )
+
+    # ---- 4) 取前 max_dishes 道并加载实际菜谱 ----
+    pool = pool[:max_dishes]
+    recipes = {r.id: r for r in db.query(Recipe).filter(Recipe.id.in_(pool)).all()}
+
+    # ---- 5) 拼紧凑文本（信息密度优先，不粘贴冗长步骤）----
+    lines = []
+    for i, rid in enumerate(pool, 1):
+        r = recipes.get(rid)
+        if r is None:
+            continue
+        tags = "、".join(
+            [t.tag.name for t in (r.tags or [])]
+        ) if getattr(r, "tags", None) else ""
+        ings = [
+            f"{ri.ingredient.name}({ri.quantity or ''})"
+            for ri in (getattr(r, "ingredients", None) or [])
+            if getattr(ri, "ingredient", None)
+        ][:6]
+        cost = f"{r.estimated_cost}元" if r.estimated_cost else "待定"
+        desc = (r.description or "").strip().replace("\n", " ")
+        if len(desc) > 60:
+            desc = desc[:60] + "…"
+        lines.append(
+            f"菜{i}｜{r.title}｜成本：{cost}\n"
+            f"食材：{'、'.join(ings) if ings else '—'}\n"
+            f"标签：{tags if tags else '—'}\n"
+            f"简介：{desc if desc else '—'}"
+        )
+    body = "\n\n".join(lines)
+    if notes:
+        body += "\n\n" + "\n".join(notes)
+    return body
+
+
 def _get_checkpoint_path() -> str:
     """获取断点文件绝对路径"""
     if os.path.isabs(settings.CHROMA_PERSIST_DIR):
@@ -571,7 +753,10 @@ def rebuild_vectorstore(db_session=None, resume: bool = True):
         # 从头重建必须先清空现有集合。
         # 注意：删除失败必须抛出，绝不能静默吞掉——
         # 否则旧分块会残留（曾导致 --from-scratch 无效，收录已删除数据）。
-        vs._collection.delete(where={})
+        # Chroma 新版本不接受 delete(where={}) 表示"全删"，需用 $in 覆盖两种已知 source_type。
+        vs._collection.delete(
+            where={"source_type": {"$in": ["recipe", "cooking_note"]}}
+        )
 
     # 构建待编码文档列表
     pending_texts = []

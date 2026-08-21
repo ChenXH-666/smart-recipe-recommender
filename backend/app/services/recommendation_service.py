@@ -387,17 +387,86 @@ def _format_recipe_with_score(recipe, score: float) -> Dict:
     }
 
 
-def _get_hot_recipe_list(db: Session, limit: int) -> List[Dict]:
-    """无偏好时的热门菜谱兜底"""
-    recipes = (
-        db.query(Recipe)
-        .options(joinedload(Recipe.tags).joinedload(RecipeTag.tag))
+def _get_cold_start_recipes(
+    db: Session, limit: int, restriction_set: Optional[set] = None
+) -> List[Dict]:
+    """新号/无行为数据的冷启动推荐：按菜品标签轮转取菜，保证品类多样
+
+    类比抖音冷启动：新用户没有行为，就"各式各样"都推一点，覆盖不同菜系/口味，
+    让用户有机会点开不同品类，从而逐步沉淀其偏好，而不是只推一堆同质热门。
+    """
+    from app.models import Recipe, RecipeTag
+
+    # 1) 收集所有已上架菜谱与其标签，按标签分桶（保证跨品类丰富度）
+    tag_rows = (
+        db.query(RecipeTag.tag_id, RecipeTag.recipe_id)
+        .join(Recipe, Recipe.id == RecipeTag.recipe_id)
         .filter(Recipe.status == "approved", Recipe.is_deleted == 0)
-        .order_by(Recipe.view_count.desc())
-        .limit(limit)
         .all()
     )
-    return [_format_recipe_with_score(r, 0.5) for r in recipes]
+    by_tag: dict = {}
+    for tag_id, recipe_id in tag_rows:
+        by_tag.setdefault(tag_id, []).append(recipe_id)
+
+    # 2) 轮转采样：每个标签取一道再换下一个，直到够数或取空
+    picked: List[int] = []
+    seen: set = set()
+    tag_keys = list(by_tag.keys())
+    while len(picked) < limit * 2:
+        progressed = False
+        for tag in tag_keys:
+            bucket = by_tag.get(tag)
+            if bucket and len(picked) < limit * 2:
+                rid = bucket.pop(0)
+                if rid not in seen:
+                    seen.add(rid)
+                    picked.append(rid)
+                    progressed = True
+        if not progressed:
+            break
+
+    # 3) 忌口前置过滤（第一优先，避免最后剔空）
+    if restriction_set and picked:
+        from app.utils.recipe_diet import filter_recipe_ids
+        allowed = filter_recipe_ids(db, picked, restriction_set)
+        picked = [rid for rid in picked if rid in allowed]
+
+    # 4) 不足时用热门补齐
+    if len(picked) < limit:
+        existing = set(picked)
+        hot = (
+            db.query(Recipe)
+            .options(joinedload(Recipe.tags).joinedload(RecipeTag.tag))
+            .filter(
+                Recipe.status == "approved",
+                Recipe.is_deleted == 0,
+                Recipe.id.notin_(existing if existing else [0]),
+            )
+            .order_by(Recipe.view_count.desc())
+            .limit(limit - len(picked) + 8)
+            .all()
+        )
+        if restriction_set and hot:
+            from app.utils.recipe_diet import filter_recipe_ids
+            hid = [r.id for r in hot]
+            allowed = filter_recipe_ids(db, hid, restriction_set)
+            hot = [r for r in hot if r.id in allowed]
+        for r in hot:
+            if r.id not in seen and len(picked) < limit:
+                seen.add(r.id)
+                picked.append(r.id)
+
+    # 5) 按顺序加载并输出（标签多样性优先，热门补齐靠后）
+    recipes = {r.id: r for r in db.query(Recipe).filter(Recipe.id.in_(picked)).all()}
+    out = []
+    for i, rid in enumerate(picked, 1):
+        r = recipes.get(rid)
+        if r:
+            score = 1.0 - (len(out) / (limit * 2))
+            out.append(_format_recipe_with_score(r, max(0.0, score)))
+        if len(out) >= limit:
+            break
+    return out
 
 
 def get_personalized_rag_recommendations(
@@ -409,13 +478,24 @@ def get_personalized_rag_recommendations(
     """基于用户偏好画像的 RAG 语义推荐（"为你推荐"统一评估逻辑）
 
     流程：
-      1. 构建偏好画像文本（行为菜谱标题 + 标签）
+      1. 构建偏好画像文本（行为菜谱标题 + 标签）；无任何行为的新号走冷启动多样推荐
       2. 用该文本做 RAG 向量语义检索，得到语义最匹配的菜谱
-      3. 结果不足时用偏好标签的 MySQL 匹配补齐；无任何偏好时回退热门
+      3. 结果不足时用偏好标签的 MySQL 匹配补齐；仍不足再热门补齐
+      4. 忌口过滤前置到每个候选阶段（第一优先），避免在最后统剔导致结果被清空
     """
+    from app.utils.recipe_diet import filter_recipe_ids
+
+    def _allowed(ids):
+        """按忌口前置过滤候选 id（无忌口时原样返回）"""
+        if not restriction_set:
+            return list(ids)
+        block = filter_recipe_ids(db, list(ids), restriction_set)
+        return [i for i in ids if i in block]
+
     pref = _build_user_preference_query(user_id, db)
     if not pref:
-        return _get_hot_recipe_list(db, limit)
+        # 新号/无行为：按标签轮转的多样化冷启动，避免全推同质热门
+        return _get_cold_start_recipes(db, limit, restriction_set)
 
     results: List[Dict] = []
     seen_ids: set = set()
@@ -425,10 +505,13 @@ def get_personalized_rag_recommendations(
         logger.error(f"个性化 RAG 检索失败（将回退标签匹配）: {e}")
         rag_results = []
 
-    for r in rag_results:
-        if r.get("source_type") != "recipe" or not r.get("source_id"):
-            continue
-        sid = int(r["source_id"])
+    # 忌口第一：先把 RAG 候选 id 按忌口过滤，再按序取菜
+    cand_ids = _allowed([
+        int(r["source_id"])
+        for r in rag_results
+        if r.get("source_type") == "recipe" and r.get("source_id")
+    ])
+    for sid in cand_ids:
         if sid in seen_ids:
             continue
         seen_ids.add(sid)
@@ -448,56 +531,51 @@ def get_personalized_rag_recommendations(
         if len(results) >= limit:
             break
 
-    # 结果不足 → 用偏好标签的 MySQL 匹配补齐（排除已推荐）
+    # 结果不足 → 用偏好标签的 MySQL 匹配补齐（排除已推荐 + 忌口前置）
     if len(results) < limit:
         tag_ids = extract_user_preferences(user_id, db)
         if tag_ids:
-            recipe_ids = [
+            recipe_ids = _allowed([
                 rt.recipe_id for rt in
                 db.query(RecipeTag).filter(RecipeTag.tag_id.in_(tag_ids)).all()
-            ]
-            fill_query = (
-                db.query(Recipe)
-                .options(joinedload(Recipe.tags).joinedload(RecipeTag.tag))
-                .filter(
-                    Recipe.id.in_(recipe_ids),
-                    Recipe.status == "approved",
-                    Recipe.is_deleted == 0,
+                if rt.recipe_id not in seen_ids
+            ])
+            if recipe_ids:
+                fill_recipes = (
+                    db.query(Recipe)
+                    .options(joinedload(Recipe.tags).joinedload(RecipeTag.tag))
+                    .filter(
+                        Recipe.id.in_(recipe_ids),
+                        Recipe.status == "approved",
+                        Recipe.is_deleted == 0,
+                    )
+                    .order_by(Recipe.favorite_count.desc())
+                    .limit(limit - len(results))
+                    .all()
                 )
-            )
-            if seen_ids:
-                fill_query = fill_query.filter(Recipe.id.notin_(seen_ids))
-            fill_recipes = (
-                fill_query.order_by(Recipe.favorite_count.desc())
-                .limit(limit - len(results))
-                .all()
-            )
-            for recipe in fill_recipes:
-                results.append(_format_recipe_with_score(recipe, 0.5))
+                for recipe in fill_recipes:
+                    seen_ids.add(recipe.id)
+                    results.append(_format_recipe_with_score(recipe, 0.5))
 
-    # 仍不足 → 热门补齐
+    # 仍不足 → 热门补齐（忌口前置）
     if len(results) < limit:
         existing_ids = {r["id"] for r in results}
-        fill_count = limit - len(results)
         extra = (
             db.query(Recipe)
             .options(joinedload(Recipe.tags).joinedload(RecipeTag.tag))
             .filter(
-                Recipe.id.notin_(existing_ids),
                 Recipe.status == "approved",
                 Recipe.is_deleted == 0,
             )
             .order_by(Recipe.view_count.desc())
-            .limit(fill_count)
+            .limit((limit - len(results)) + 8)
             .all()
         )
-        for recipe in extra:
+        extra = [r for r in extra if r.id not in existing_ids]
+        allowed_extra = set(_allowed([r.id for r in extra]))
+        extra = [r for r in extra if r.id in allowed_extra]
+        for recipe in extra[: limit - len(results)]:
             results.append(_format_recipe_with_score(recipe, 0.3))
-
-    if restriction_set:
-        from app.utils.recipe_diet import filter_recipe_ids
-        allowed = filter_recipe_ids(db, [r["id"] for r in results], restriction_set)
-        results = [r for r in results if r["id"] in allowed]
 
     return results[:limit]
 

@@ -8,11 +8,8 @@
           <span class="logo-text">智能菜谱推荐系统</span>
         </div>
       </div>
-      <!-- 移动端汉堡菜单按钮 -->
-      <div class="mobile-menu-toggle" @click="mobileMenuOpen = !mobileMenuOpen">
-        <el-icon :size="22"><Fold v-if="mobileMenuOpen" /><Expand v-else /></el-icon>
-      </div>
-      <div class="header-center" :class="{ 'mobile-open': mobileMenuOpen }">
+      <!-- 移动端：导航以横向滑动标签栏展示于下方独立一行，无需汉堡按钮 -->
+      <div class="header-center">
         <el-menu
           mode="horizontal"
           :default-active="activeMenu"
@@ -149,16 +146,14 @@ function createPlanFromCart() {
   router.push(`/meal-plans/create?recipe_ids=${ids}`)
 }
 
-const mobileMenuOpen = ref(false)
 console.log('[MainLayout] loaded with :key fix, route.path =', route.path)
 
-// 路由切换时关闭移动端菜单，并清除残留的 ElMessage 通知
+// 路由切换时清除残留的 ElMessage 通知
 // 原因：MainLayout 的 :key="route.path" 会强制同级路由切换时重新渲染组件，
 // 这会打断 ElMessage 的自动关闭计时器，导致 toast 跨页面残留
 watch(
   () => route.path,
   () => {
-    mobileMenuOpen.value = false
     ElMessage.closeAll()
   }
 )
@@ -196,20 +191,31 @@ const breadcrumbs = computed(() => {
       { name: adminPages[key] },
     ]
   }
+  // 个人中心子页面：返回「个人中心 → 具体页面」两级，个人中心可点击回资料页
+  const userPages = {
+    'user/profile': '个人主页',
+    'user/favorites': '我的收藏',
+    'user/history': '浏览历史',
+    'user/conversations': 'AI对话记录',
+    'user/preferences': '偏好设置',
+    'user/my-recipes': '我的菜谱',
+    'user/my-meal-plans': '我的套餐',
+  }
+  if (userPages[key]) {
+    return [
+      { name: '个人中心', path: '/user/profile' },
+      { name: userPages[key] },
+    ]
+  }
   const map = {
     admin: { name: '后台管理' },
+    'for-you': { name: '为你推荐' },
+    'hot-recipes': { name: '热门菜谱' },
     recipes: { name: '菜谱浏览' },
     'recipes/create': { name: '创建菜谱' },
     'meal-plans': { name: '套餐广场' },
     'meal-plans/create': { name: '创建套餐' },
     'cooking-notes': { name: '烹饪心得' },
-    'user/profile': { name: '个人中心' },
-    'user/favorites': { name: '我的收藏' },
-    'user/history': { name: '浏览历史' },
-    'user/conversations': { name: 'AI对话记录' },
-    'user/preferences': { name: '偏好设置' },
-    'user/my-recipes': { name: '我的菜谱' },
-    'user/my-meal-plans': { name: '我的套餐' },
   }
   if (map[key]) return [map[key]]
   // 菜谱编辑页：/recipes/:id/edit → 编辑菜谱
@@ -223,7 +229,6 @@ const breadcrumbs = computed(() => {
 
 function handleMenu(index) {
   router.push(index)
-  mobileMenuOpen.value = false  // 移动端点击菜单项后关闭菜单
 }
 
 /**
@@ -471,21 +476,6 @@ function handleCommand(cmd) {
   opacity: 0;
 }
 
-/* ===== 移动端汉堡菜单按钮：默认隐藏，仅在窄屏下显示 ===== */
-.mobile-menu-toggle {
-  display: none;
-  color: #fff;
-  cursor: pointer;
-  padding: 6px 10px;
-  border-radius: 4px;
-  align-items: center;
-  transition: background 0.2s;
-}
-
-.mobile-menu-toggle:hover {
-  background: rgba(255, 255, 255, 0.15);
-}
-
 /* ===== 响应式断点：≤900px 时启用移动端导航布局 ===== */
 @media (max-width: 900px) {
   .layout-header {
@@ -499,32 +489,38 @@ function handleCommand(cmd) {
     font-size: 15px;
   }
 
-  .mobile-menu-toggle {
-    display: flex;
-    margin-left: auto;
-  }
-
-  /* 导航菜单在移动端默认折叠为下拉式 */
+  /* 移动端导航：四个入口做成一行、超出左右滑动的横向标签栏 */
   .header-center {
     order: 3;
     width: 100%;
-    max-height: 0;
-    overflow: hidden;
-    transition: max-height 0.25s ease;
+    max-height: none;
+    overflow-x: auto;
+    overflow-y: hidden;
     flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
   }
 
-  .header-center.mobile-open {
-    max-height: 320px;
+  .header-center::-webkit-scrollbar {
+    display: none;
   }
 
   .header-menu {
     height: auto;
+    display: flex;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    width: max-content;
   }
 
   .header-menu :deep(.el-menu-item) {
     height: 48px;
     line-height: 48px;
+    flex-shrink: 0;
+    white-space: nowrap;
   }
 
   .header-right {

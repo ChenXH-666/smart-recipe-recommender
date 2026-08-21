@@ -47,8 +47,11 @@
 
 <script setup>
 import { ref, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import api from '../../api'
+
+const router = useRouter()
 
 const cuisineOptions = [
   '川菜', '粤菜', '湘菜', '鲁菜', '本帮菜', '东北菜', '西北菜',
@@ -100,6 +103,11 @@ async function save() {
       free_text: form.value.free_text,
     })
     ElMessage.success('偏好已保存')
+    // 保存成功后自动返回上一页；无历史记录时（如直接访问）回个人中心资料页
+    setTimeout(() => {
+      if (window.history.length > 1) router.back()
+      else router.push('/user/profile')
+    }, 600)
   } catch (e) {
     ElMessage.error('保存失败，请稍后再试')
   } finally {
