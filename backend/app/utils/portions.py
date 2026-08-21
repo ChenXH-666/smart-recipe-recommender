@@ -68,7 +68,9 @@ def parse_grams(quantity: str, default_per_item: int = 100) -> float | None:
         return num * _VOLUME_TO_GRAM_ML
 
     # 可数单位按每份默认重量估算
-    for u, grams in UNIT_GRAM.items():
+    # 注意：需按单位名长度降序匹配，保证更具体的单位（如"小勺""大勺"）先于
+    # 其子串单位（如"勺"）命中，否则 "1小勺" 会被 "勺" 误判为 15g。
+    for u, grams in sorted(UNIT_GRAM.items(), key=lambda kv: -len(kv[0])):
         if u in q:
             if grams is not None:
                 return num * grams

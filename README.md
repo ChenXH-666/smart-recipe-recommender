@@ -150,6 +150,14 @@ npm run dev
 - 前端页面：http://localhost:3000
 - API 文档：http://localhost:8000/docs
 
+### 6. 运行单元测试
+```bash
+cd backend
+conda activate food
+python -m pytest tests -v --cov=app --cov-report=term-missing
+```
+单元测试基于 pytest 编写，共 141 个用例，覆盖纯函数 / 模型 / 服务 / 接口四层；测试使用 SQLite 内存库并对 Chroma、LLM 等外部依赖打桩隔离，无需连接真实数据库与模型服务。整体行覆盖率约 58%，核心逻辑（配置、安全、统计、营养、工具函数、AI 引擎）覆盖率 76%~100%。
+
 ## 注意事项
 
 - **API Key 配置**：请在 `backend/.env` 中配置真实的 SiliconFlow API Key，不要将密钥提交到版本控制

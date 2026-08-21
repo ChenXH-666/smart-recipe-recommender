@@ -1,4 +1,4 @@
-﻿aiohappyeyeballs==2.6.2
+aiohappyeyeballs==2.6.2
 aiohttp==3.13.5
 aiosignal==1.4.0
 annotated-doc==0.0.4
@@ -82,6 +82,8 @@ pydantic_core==2.46.4
 Pygments==2.20.0
 PyMySQL==1.2.0
 PyPika==0.51.1
+pytest==8.3.4
+pytest-cov==6.0.0
 pyproject_hooks==1.2.0
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.2
