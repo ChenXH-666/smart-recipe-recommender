@@ -135,14 +135,31 @@ def get_base_pool(query: str, db):
             if len(pool) >= settings.RAG_CHAT_MAX_DISHES + 8:
                 break
 
-    recipes = {r.id: r for r in db.query(Recipe).filter(Recipe.id.in_(pool)).all()}
+    # 与生产一致预加载标签/食材链路，避免精排文档构建时的 N+1 惰性查询
+    from app.models import RecipeTag, RecipeIngredient
+    from sqlalchemy.orm import joinedload, selectinload
+    recipes = {
+        r.id: r for r in db.query(Recipe)
+        .options(
+            joinedload(Recipe.tags).joinedload(RecipeTag.tag),
+            selectinload(Recipe.ingredients).joinedload(RecipeIngredient.ingredient),
+        )
+        .filter(Recipe.id.in_(pool))
+        .all()
+    }
     return pool, recipes
 
 
 def finalize_pool(query: str, pool: list, recipes: dict, scores, alpha: float) -> list:
-    """第二级（按指定 α）：分数融合 → 预算分组 → 截断前 K（与生产一致）。"""
+    """第二级（按指定 α）：分数融合 → 预算分组 → 截断前 K（与生产一致）。
+
+    生产分支语义：融合生效（有分数且 α>0）→ 预算分组组内保持融合相关度序；
+    未融合（scores 为 None 或 α=0）→ 组内按成本升序（与生产基线一致，
+    保证实验 α=0 行完全等于"关闭精排"的线上行为）。
+    """
+    applied = bool(scores) and alpha > 0
     p = pool
-    if scores:
+    if applied:
         p = _fusion_sorted_pool(p, recipes, scores, alpha=alpha)
 
     budget = _extract_budget(query)
@@ -153,7 +170,10 @@ def finalize_pool(query: str, pool: list, recipes: dict, scores, alpha: float) -
 
         in_ids = [rid for rid in p if _cost(rid) <= budget]
         over_ids = [rid for rid in p if _cost(rid) > budget]
-        p = in_ids + over_ids
+        if applied:
+            p = in_ids + over_ids
+        else:
+            p = sorted(in_ids, key=_cost) + sorted(over_ids, key=_cost)
 
     return p[: settings.RAG_CHAT_MAX_DISHES]
 

@@ -524,11 +524,14 @@ def _get_popular_recipe_ids(db, limit: int, exclude: Optional[Iterable[int]] = N
     return [r[0] for r in rows]
 
 
-# 预算解析：识别"预算500 / 500元左右 / 500块以内 / 大概500元"等表达
+# 预算解析：识别"预算500 / 500元左右 / 300块以内 / 花150元"等表达。
+# 注意"块"单独出现常为量词（"5块排骨""3块冰糖"），兜底模式只认"元"；
+# "块"须搭配预算/花费语境或范围词，避免量词误判为货币。
 _BUDGET_PATTERNS = [
-    re.compile(r"预算\s*[是约大概为][约大概]{0,2}\s*(\d+)\s*(?:元|块|rmb)?", re.I),
+    re.compile(r"预算\s*[是约大概为]?[约大概]{0,2}\s*(\d+)\s*(?:元|块|rmb)?", re.I),
     re.compile(r"(\d+)\s*(?:元|块)\s*(?:左右|上下|以[内下])"),
-    re.compile(r"(\d+)\s*(?:元|块)"),
+    re.compile(r"(?:花|花费|消费|价格|成本|预算)[^\d]{0,4}(\d+)\s*(?:元|块)", re.I),
+    re.compile(r"(\d+)\s*元"),
 ]
 
 
@@ -725,7 +728,8 @@ def build_recipe_pool_context(
         * 不硬性拦截，仅把用户忌口作为参考信息给模型，以对方要求为准。
     """
     from app.utils.recipe_diet import filter_recipe_ids
-    from app.models import Recipe
+    from app.models import Recipe, RecipeTag, RecipeIngredient
+    from sqlalchemy.orm import joinedload, selectinload
 
     if max_dishes is None:
         max_dishes = settings.RAG_CHAT_MAX_DISHES
@@ -756,10 +760,24 @@ def build_recipe_pool_context(
 
     # ---- 1.5) Rerank 精排：按语义相关度重排候选池（①.5）----
     # 菜谱对象在这里加载一次，供精排打分与后续拼上下文共用；
+    # joinedload/selectinload 预加载标签与食材链路，避免精排文档构建与
+    # 上下文拼接时逐菜谱惰性加载（N+1：每轮对话数百条 SQL → 3 条）。
     # 精排失败返回 None → 跳过重排，pool 保持召回原序（降级）。
-    recipes = {r.id: r for r in db.query(Recipe).filter(Recipe.id.in_(pool)).all()}
+    recipes = {
+        r.id: r for r in db.query(Recipe)
+        .options(
+            joinedload(Recipe.tags).joinedload(RecipeTag.tag),
+            selectinload(Recipe.ingredients).joinedload(RecipeIngredient.ingredient),
+        )
+        .filter(Recipe.id.in_(pool))
+        .all()
+    }
     rerank_scores = _rerank_pool_scores(query, pool, recipes)
-    if rerank_scores:
+    # fusion_applied：精排拿到分数且权重 > 0 才算融合生效。
+    # α=0 时即使精排成功也不改变排序（含预算组内成本升序），保证
+    # "RERANK_ALPHA=0" 与 "关闭精排" 的链路行为完全一致（评测基线可比）。
+    fusion_applied = bool(rerank_scores) and settings.RERANK_ALPHA > 0
+    if fusion_applied:
         # 分数融合排序：embedding 召回位置分 + rerank 相关分加权，
         # 精排只微调不推翻粗排好序（RERANK_ALPHA=0 纯召回序，=1 纯精排序）
         pool = _fusion_sorted_pool(pool, recipes, rerank_scores)
@@ -799,11 +817,11 @@ def build_recipe_pool_context(
 
         in_ids = [rid for rid in pool if _cost(rid) <= budget]
         over_ids = [rid for rid in pool if _cost(rid) > budget]
-        if rerank_scores:
-            # 精排激活：预算分组依旧优先，组内保持精排相关度序
+        if fusion_applied:
+            # 融合生效：预算分组依旧优先，组内保持融合相关度序
             pool = in_ids + over_ids
         else:
-            # 未精排（关闭/降级）：保持原逻辑，组内按成本升序
+            # 未融合（关闭/α=0/降级）：保持原逻辑，组内按成本升序
             pool = sorted(in_ids, key=_cost) + sorted(over_ids, key=_cost)
         notes.append(
             f"用户预算约为 {budget} 元。请在不超过预算的前提下尽量用足预算"

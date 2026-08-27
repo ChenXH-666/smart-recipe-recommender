@@ -26,12 +26,23 @@ class TestExtractBudget:
         ("500元左右", 500),
         ("大概300块以内", 300),
         ("预算1元", 1),
+        ("预算500的潮汕年夜饭", 500),
+        ("这顿饭花150元", 150),
     ])
     def test_valid_budgets(self, text, expected):
         assert rag._extract_budget(text) == expected
 
     @pytest.mark.parametrize("text", ["随便吃点", "预算0元", "预算999999", None, ""])
     def test_no_budget(self, text):
+        assert rag._extract_budget(text) is None
+
+    @pytest.mark.parametrize("text", [
+        "家里还有5块排骨，帮我安排一餐",   # "块"为量词，不是货币
+        "做菜要用3块冰糖",
+        "两块姜怎么切",
+        "步骤里写着煮30分钟",
+    ])
+    def test_unit_word_not_misread_as_budget(self, text):
         assert rag._extract_budget(text) is None
 
 
@@ -280,6 +291,20 @@ class TestRerankInRecipePool:
         ordered = rag._fusion_sorted_pool(pool, recipes, scores)
         assert ordered[-1] == 999  # 无分菜沉底
         assert ordered[0] == 101
+
+    def test_rerank_alpha_zero_keeps_budget_cost_order(self, db_session, _patch_retrieval, monkeypatch):
+        # α=0：即使精排拿到分数，预算组内仍按成本升序（与"关闭精排"的基线行为一致）
+        monkeypatch.setattr(rag.settings, "RERANK_ALPHA", 0.0)
+        cheap = _recipe(db_session, "经济菜", cost=20)
+        expen = _recipe(db_session, "中档菜", cost=80)
+        monkeypatch.setattr(rag, "rag_search",
+                            lambda *a, **k: [{"source_id": expen.id}, {"source_id": cheap.id}])
+        monkeypatch.setattr(rag, "_rerank_pool_scores",
+                            lambda q, pool, recipes: {expen.id: 0.9, cheap.id: 0.1})
+        body = rag.build_recipe_pool_context(db_session, "预算约100元", restriction_set=set())
+        # 精排分高的中档菜(80)没有借 α=0 改变组内成本升序
+        assert body.index("经济菜") < body.index("中档菜")
+        assert "90~100 元" in body
 
 
 # ------------------------------ AI 对话引擎 ------------------------------
