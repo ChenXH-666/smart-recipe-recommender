@@ -63,3 +63,17 @@ class TestCoverWhitelist:
         assert _settings().recipe_cover_whitelist_list == [
             "meishichina.com", "xiachufang.com",
         ]
+
+
+class TestRerankApiKey:
+    def test_fallback_to_embedding_key(self):
+        # RERANK_API_KEY 未配置时自动复用 EMBEDDING_API_KEY（同一 SiliconFlow 账号）
+        s = _settings(EMBEDDING_API_KEY="emb-key")
+        assert s.rerank_api_key == "emb-key"
+
+    def test_explicit_key_wins(self):
+        s = _settings(EMBEDDING_API_KEY="emb-key", RERANK_API_KEY="rerank-key")
+        assert s.rerank_api_key == "rerank-key"
+
+    def test_empty_when_both_missing(self):
+        assert _settings().rerank_api_key == ""

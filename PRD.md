@@ -65,8 +65,9 @@
 | 后端框架 | Python FastAPI 0.136 + Starlette + Uvicorn |
 | ORM 与数据库 | SQLAlchemy 2.0 + PyMySQL + MySQL 8（utf8mb4） |
 | AI 框架 | LangChain 1.3 + ChromaDB 1.5 |
-| LLM 服务 | 默认 SiliconFlow DeepSeek-R1-0528-Qwen3-8B；可经环境变量切换小米 Mimo mimo-v2.5（可关闭思考模式） |
+| LLM 服务 | 默认小米 Mimo mimo-v2.5（默认关闭深度思考，仅输出最终答案）；Embedding/Rerank 恒用 SiliconFlow |
 | Embedding 服务 | SiliconFlow BAAI/bge-m3（1024 维，多语言） |
+| Rerank 精排服务 | SiliconFlow BAAI/bge-reranker-v2-m3（交叉编码，两阶段检索第二级；复用 Embedding API Key） |
 | 认证方案 | JWT（python-jose）+ bcrypt 密码哈希 |
 | 流式协议 | SSE（Server-Sent Events，FastAPI `StreamingResponse` 手动实现；`data` 帧 + `[DONE]` 结束标记，会话 ID 走 `X-Conversation-Id` 响应头） |
 
@@ -76,6 +77,7 @@
 |------|------|
 | RAG | Retrieval-Augmented Generation，检索增强生成；先从向量库检索相关文档，再交给 LLM 生成答案 |
 | Embedding | 将文本转换为稠密向量，用于语义相似度计算 |
+| Rerank（精排） | 交叉编码重排序模型；将查询与候选拼成文本对逐对细读打分，按相关度重排小候选集，弥补 Embedding 双塔结构交互浅的精度上限 |
 | Top-K | 向量检索返回的最相似文档数量；对话场景先召回 K≈40 再按菜谱去重，最终候选池上限 12 道 |
 | 套餐（Meal Plan） | 多道菜组合而成的完整菜单，如"工作日三人晚餐" |
 | SSE | Server-Sent Events，服务端推送技术，用于 AI 流式输出 |
@@ -127,7 +129,7 @@
 
 | 编号 | 功能名称 | 功能描述 | 优先级 |
 |------|---------|---------|--------|
-| FR-A01 | 流式多轮对话 | 用户发送自然语言问题，系统通过 RAG 检索菜谱后交由 LLM 生成回答，使用 SSE 实时流式输出 | P0 |
+| FR-A01 | 流式多轮对话 | 用户发送自然语言问题，系统经两阶段检索（Embedding 粗排召回 → Rerank 交叉编码精排）构建菜谱候选池后交由 LLM 生成回答，使用 SSE 实时流式输出 | P0 |
 | FR-A02 | 会话管理 | 每次对话自动创建/续接会话（`ai_conversations`），消息持久化到 `ai_messages` 表 | P0 |
 | FR-A03 | 历史对话查询 | 用户可查看历史会话列表与消息内容 | P0 |
 | FR-A04 | 会话删除 | 用户可删除自己的会话，同时清理内存中的对话上下文 | P0 |
@@ -225,6 +227,7 @@
 | AI 流式首 token 响应 | ≤ 2s | SSE 连接建立到首个 chunk 到达 |
 | Embedding 单批次编码（64 条） | ≤ 5s | SiliconFlow API 实测 |
 | 向量检索 Top-5 | ≤ 200ms | Chroma 本地查询 |
+| Rerank 精排（单轮对话，约 20~30 候选对） | ≤ 1s | SiliconFlow API 实测；超时（默认 10s）自动降级为召回排序 |
 | 并发支持 | ≥ 100 QPS | Uvicorn 多 worker 部署 |
 | 前端首屏加载 | ≤ 2s | Vite 构建 + 路由懒加载 |
 
@@ -246,6 +249,7 @@
 ### 3.3 可靠性需求
 
 - **RAG 容错降级**：Embedding API 失败时返回零向量兜底；Chroma 检索失败时降级到 metadata 关键词评分排序
+- **Rerank 精排降级**：精排 API 失败/超时/未配置 Key 时返回空，候选池自动退回召回原序，主链路不受影响；可通过 `RERANK_ENABLED=false` 一键关闭
 - **AI 服务降级**：LLM 流式对话失败时不阻断候选菜谱展示，返回降级提示文案
 - **向量同步容错**：菜谱创建/更新时向量同步失败不影响主流程（try/except 兜底）
 - **断点续传**：全量向量库重建支持 checkpoint，中断后可从断点继续，避免重复消耗 API 额度
@@ -411,10 +415,10 @@
                           │
         ┌─────────────────┼─────────────────┐
         ▼                 ▼                 ▼
-┌──────────────┐  ┌──────────────┐  ┌──────────────┐
-│  MySQL 8.0   │  │  Chroma DB   │  │ 外部 AI 服务  │
-│ (16张关系表)  │  │ (本地持久化)  │  │ SiliconFlow │
-└──────────────┘  └──────────────┘  └──────────────┘
+┌──────────────┐  ┌──────────────┐  ┌────────────────┐
+│  MySQL 8.0   │  │  Chroma DB   │  │  外部 AI 服务    │
+│ (16张关系表)  │  │ (本地持久化)  │  │ Mimo + 硅基流动 │
+└──────────────┘  └──────────────┘  └────────────────┘
                           │
                           ▼
                   ┌──────────────┐
@@ -443,14 +447,14 @@
 请求 → CORS 中间件 → 路由匹配 → 依赖注入（鉴权） → 路由处理函数 → 响应
 ```
 
-### 5.4 RAG 检索流程（对话场景）
+### 5.4 RAG 两阶段检索流程（对话场景）
 
 ```
 用户查询（AI 对话入口）
    │
    ▼
 ┌─────────────────────┐
-│ Embedding 向量化     │ SiliconFlow BGE-M3 (1024维)
+│ 第一级：Embedding 粗排召回 │ SiliconFlow BGE-M3 (1024维，双塔 bi-encoder)
 └─────────┬───────────┘
           │
           ▼
@@ -468,12 +472,18 @@
           │ 候选过少 → 热门菜谱补齐（按收藏/浏览降序，保证非空）
           ▼
 ┌─────────────────────┐
+│ 第二级：Rerank 精排    │ bge-reranker-v2-m3 交叉编码，「查询×每道候选」拼对逐对打相关分
+└─────────┬───────────┘
+          │ 分数融合重排：α×精排分+(1-α)×召回位置分（RERANK_ALPHA=0.5 微调）
+          │ 高相关菜上浮、兜底/沾边菜沉底；失败/超时/未启用→降级为召回原序
+          ▼
+┌─────────────────────┐
 │ 忌口过滤前置          │ 硬性剔除触忌口菜谱；全部触忌口→放宽并备注（为他人做菜时不硬拦）
 └─────────┬───────────┘
           │
           ▼
 ┌─────────────────────┐
-│ 预算感知排序          │ 识别预算→预算内菜品靠前，注入"尽量用足预算(90%~100%)"提示
+│ 预算感知排序          │ 识别预算→预算内菜品靠前（精排激活时组内保持相关度序），注入"尽量用足预算(90%~100%)"提示
 └─────────┬───────────┘
           │
           ▼
@@ -483,7 +493,7 @@
           │ 动态内容置于请求尾部；静态系统提示词作稳定前缀（利于缓存）
           ▼
 ┌─────────────────────┐
-│ LLM 流式生成         │ DeepSeek-R1-0528-Qwen3-8B
+│ LLM 流式生成         │ 小米 Mimo mimo-v2.5（关闭深度思考）
 └─────────┬───────────┘
           │
           ▼
@@ -518,8 +528,9 @@
                   │
                   ▼
         ┌──────────────────┐
+        │ Mimo API (LLM)   │
         │ SiliconFlow API  │
-        │ (LLM+Embedding)  │
+        │ (Embedding+精排) │
         └──────────────────┘
 ```
 
@@ -770,7 +781,8 @@
 
 | 场景 | 应急方案 |
 |------|---------|
-| SiliconFlow API 整体不可用 | RAG 检索降级到关键词匹配；AI 对话返回"服务暂不可用"提示；候选菜谱仍可展示 |
+| Mimo API 不可用（LLM） | AI 流式对话返回"服务暂不可用"提示；候选菜谱仍可展示 |
+| SiliconFlow API 不可用（Embedding/Rerank） | Embedding 失败零向量兜底→关键词匹配降级；Rerank 失败/超时自动退回召回原序；检索主链路不中断 |
 | MySQL 宕机 | 健康检查 `/api/health` 探测；启动备用只读实例（如条件允许） |
 | Chroma 数据损坏 | 使用 `rebuild_vectorstore(resume=False)` 全量重建；checkpoint 文件可清理 |
 | 服务器磁盘满 | Chroma 持久化目录与日志目录监控；定期清理过期日志 |
@@ -806,13 +818,16 @@
 | JWT_ACCESS_TOKEN_EXPIRE_MINUTES | 1440 | 24 小时 |
 | CHROMA_PERSIST_DIR | F:/chroma_db | 向量库持久化目录（纯ASCII路径，避免Windows中文路径问题） |
 | EMBEDDING_MODEL | BAAI/bge-m3 | 1024 维多语言 |
-| LLM_MODEL | deepseek-ai/DeepSeek-R1-0528-Qwen3-8B | 支持思考链；可切小米 Mimo |
+| LLM_MODEL | mimo-v2.5 | 小米 Mimo 对话模型；LLM_PROVIDER=mimo 时自动关闭深度思考 |
 | LLM_TEMPERATURE | 0.7 | 平衡创造性与稳定性 |
 | LLM_MAX_TOKENS | 4096 | 单次回复上限（≥4096，避免完整菜单被截断） |
-| LLM_DISABLE_THINKING | False | 关闭 MiMo 等默认深度思考（reasoning_content） |
+| LLM_DISABLE_THINKING | True | 关闭 MiMo 等默认深度思考（reasoning_content） |
 | RAG_TOP_K | 5 | 基础检索返回文档块数 |
 | RAG_CHAT_RECALL_K | 40 | 对话RAG向量召回候选分块数（召回率优先） |
 | RAG_CHAT_MAX_DISHES | 12 | 去重后喂给模型的菜谱上限 |
+| RERANK_ENABLED | true | 精排总开关；失败/超时自动降级为召回排序 |
+| RERANK_MODEL | BAAI/bge-reranker-v2-m3 | SiliconFlow 交叉编码精排模型（复用 Embedding Key） |
+| RERANK_ALPHA | 0.5 | 分数融合权重：α×精排分+(1−α)×召回位置分；0=纯召回序，1=纯精排序（论文实验确定 0.5 为峰值） |
 | RAG_CHUNK_SIZE | 500 | 分块字符数 |
 | RAG_CHUNK_OVERLAP | 50 | 相邻块重叠 |
 | RAG_EMBEDDING_BATCH_SIZE | 64 | 单次 Embedding 批次 |

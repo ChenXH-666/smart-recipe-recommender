@@ -8,7 +8,16 @@ RAG (Retrieval-Augmented Generation) 服务 —— 向量构建、语义检索�
 本系统的 RAG 实现采用了经典的"向量数据库 + 语义检索 + LLM 增强"架构：
 
 【整体流程】
-  用户提问 → Embedding 向量化 → Chroma 相似度检索 → 拼接上下文 → LLM 生成回答
+  用户提问 → Embedding 向量化 → Chroma 相似度检索（粗排召回）
+          → Rerank 交叉编码精排（按语义相关度重排候选池）
+          → 拼接上下文 → LLM 生成回答
+
+  即"两阶段检索"（Two-Stage Retrieval）架构：
+    - 第一级粗排：双塔 bi-encoder（BGE-M3 embedding），向量离线预建、毫秒级
+      扫全库，负责"快而全"地捞出候选（召回率优先）；
+    - 第二级精排：交叉编码 cross-encoder（bge-reranker-v2-m3），将查询与每条
+      候选拼成文本对送入模型逐对细读打分，词级交互带来更高精度，负责"准而贵"
+      地重排小候选集。精排失败/超时自动降级为纯召回排序，主链路可用性不受影响。
 
 【组件说明】
   1. Embedding 模型：使用 SiliconFlow 的 BGE-M3 模型（BAAI/bge-m3）
@@ -540,6 +549,152 @@ def _extract_budget(text: str) -> Optional[int]:
     return None
 
 
+def _build_rerank_document(recipe) -> str:
+    """
+    为精排模型拼装单道菜谱的紧凑描述文本（标题｜标签｜食材｜简介）。
+
+    与喂给 LLM 的候选池格式保持同源信息，让精排"看到"的菜谱画像
+    与最终上下文一致；控制长度以减小 rerank 请求载荷与延迟。
+    """
+    tags = "、".join(
+        [t.tag.name for t in (recipe.tags or [])]
+    ) if getattr(recipe, "tags", None) else ""
+    ings = [
+        f"{ri.ingredient.name}({ri.quantity or ''})"
+        for ri in (getattr(recipe, "ingredients", None) or [])
+        if getattr(ri, "ingredient", None)
+    ][:6]
+    parts = [recipe.title]
+    if tags:
+        parts.append(f"标签：{tags}")
+    if ings:
+        parts.append(f"食材：{'、'.join(ings)}")
+    desc = (recipe.description or "").strip().replace("\n", " ")
+    if desc:
+        parts.append(f"简介：{desc[:80]}")
+    return "｜".join(parts)
+
+
+def _rerank_pool_scores(
+    query: str, pool: List[int], recipes: Dict[int, "Recipe"]
+) -> Optional[Dict[int, float]]:
+    """
+    调用 Rerank API 对候选菜谱池做交叉编码精排（两阶段检索第二级）。
+
+    入参 pool 为召回+去重后的有序菜谱 ID 列表，recipes 为 ID → 菜谱对象映射。
+    将「查询 + 每道候选菜的紧凑描述」拼成文本对送 bge-reranker-v2-m3 逐对打分，
+    返回 {菜谱ID: 相关度分}；按分数降序重排即得精排结果。
+
+    【降级策略】以下任一情况返回 None，调用方自动退回召回原序，主链路不受影响：
+      - 配置关闭（RERANK_ENABLED=false）或未配置 API Key
+      - 候选不足 2 道（无重排意义）
+      - 请求超时 / 网络异常 / 接口返回异常
+    """
+    if not settings.RERANK_ENABLED:
+        return None
+
+    api_key = settings.rerank_api_key
+    if not api_key:
+        logger.warning("Rerank 未配置 API Key，跳过精排（降级为召回排序）")
+        return None
+
+    # 只精排前 RERANK_MAX_CANDIDATES 道（超出部分保持召回原序沉底）
+    candidates = [rid for rid in pool if rid in recipes][
+        : settings.RERANK_MAX_CANDIDATES
+    ]
+    if len(candidates) < 2:
+        return None
+
+    documents = [_build_rerank_document(recipes[rid]) for rid in candidates]
+    try:
+        resp = requests.post(
+            settings.RERANK_API_URL,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": settings.RERANK_MODEL,
+                "query": query,
+                "documents": documents,
+                "top_n": len(documents),   # 全部候选都要打分（重排而非截断）
+                "return_documents": False,
+            },
+            timeout=settings.RERANK_TIMEOUT,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        logger.warning(f"Rerank 精排失败，降级为召回排序: {e}")
+        return None
+
+    results = data.get("results") or []
+    if not results:
+        logger.warning("Rerank 返回空结果，降级为召回排序")
+        return None
+
+    scores: Dict[int, float] = {}
+    for item in results:
+        try:
+            idx = int(item["index"])
+            score = float(item["relevance_score"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if 0 <= idx < len(candidates):
+            scores[candidates[idx]] = score
+
+    if not scores:
+        return None
+    # 可观测性：日志确认精排生效及重排规模（测试/排障时便于核对）
+    logger.info(
+        f"Rerank 精排生效：已对 {len(scores)} 道候选按相关度重排"
+        f"（候选池共 {len(pool)} 道）"
+    )
+    return scores
+
+
+def _fusion_sorted_pool(
+    pool: List[int], recipes: Dict[int, "Recipe"], scores: Dict[int, float],
+    alpha: Optional[float] = None,
+) -> List[int]:
+    """
+    分数融合排序：结合 Embedding 召回位置分与 Rerank 相关分，重排候选池。
+
+    动机：双塔 Embedding 在菜名/食材等精确匹配上排序稳定；而交叉编码 reranker
+    未经菜谱领域适配时，纯精排重排可能"推翻"粗排已有好序（把相关菜挤出前 K，
+    导致 Recall/MRR 下降）。融合排序取两者之长：
+
+        最终分 = α × rerank_score + (1-α) × recall_pos
+        recall_pos = 1 / (送入精排的候选序号 + 1)（召回越靠前分越高）
+
+    RERANK_ALPHA 控制权重：0=纯召回序（精排不生效），1=纯精排序（原行为），
+    默认 0.5 让精排做微调——高相关度菜仍能上浮，但不会整体推翻粗排好序。
+
+    未获得精排分数或超出精排上限的候选（热门兜底菜）保持沉底与原相对序。
+
+    alpha 可显式传入覆盖配置（供参数扫描实验使用）；缺省读 RERANK_ALPHA。
+    """
+    if alpha is None:
+        alpha = settings.RERANK_ALPHA
+    if not scores or alpha <= 0:
+        return pool
+    if alpha >= 1:
+        return sorted(pool, key=lambda rid: -scores.get(rid, float("-inf")))
+
+    # 送入精排的候选顺序 = pool 召回序，作为位置分基准
+    candidates = [rid for rid in pool if rid in recipes][
+        : settings.RERANK_MAX_CANDIDATES
+    ]
+    pos_score = {rid: 1.0 / (i + 1) for i, rid in enumerate(candidates)}
+
+    def _fusion_score(rid: int) -> float:
+        if rid not in scores or rid not in pos_score:
+            return float("-inf")
+        return alpha * scores[rid] + (1 - alpha) * pos_score[rid]
+
+    return sorted(pool, key=_fusion_score, reverse=True)
+
+
 def build_recipe_pool_context(
     db,
     query: str,
@@ -553,8 +708,11 @@ def build_recipe_pool_context(
     链路（对应优化点）：
       ① 召回兜底：向量召回（按菜谱去重）后若为空/过少，用热门菜谱二次补齐，
          保证任何查询都有库内菜品锚定，杜绝模型靠内部知识编造。
-      ② 预算感知：从消息中识别预算，预算内菜品排序靠前，并在上下文附预算提示，
-         让模型按真实成本排菜单、报总价。
+      ①.5 Rerank 精排：对候选池做交叉编码打分，并经分数融合（α×精排分 +
+         (1-α)×召回位置分）重排，语义相关度高的菜上浮、沾边召回与热门兜底菜
+         沉底；精排失败/超时自动降级为召回原序，主链路不受影响。
+      ② 预算感知：从消息中识别预算，预算内菜品排序靠前（精排激活时组内保持
+         相关度序），并在上下文附预算提示，让模型按真实成本排菜单、报总价。
       ③ 永不空：召回 + 热门兜底 + 忌口全中时放宽，三重保证不带空上下文给模型。
 
     紧凑格式（标题/成本/食材/标签/短简介）使同等 token 承载更多真实菜谱，
@@ -596,6 +754,16 @@ def build_recipe_pool_context(
     if not pool:
         return ""
 
+    # ---- 1.5) Rerank 精排：按语义相关度重排候选池（①.5）----
+    # 菜谱对象在这里加载一次，供精排打分与后续拼上下文共用；
+    # 精排失败返回 None → 跳过重排，pool 保持召回原序（降级）。
+    recipes = {r.id: r for r in db.query(Recipe).filter(Recipe.id.in_(pool)).all()}
+    rerank_scores = _rerank_pool_scores(query, pool, recipes)
+    if rerank_scores:
+        # 分数融合排序：embedding 召回位置分 + rerank 相关分加权，
+        # 精排只微调不推翻粗排好序（RERANK_ALPHA=0 纯召回序，=1 纯精排序）
+        pool = _fusion_sorted_pool(pool, recipes, rerank_scores)
+
     # ---- 2) 忌口处理（③ + 为他人做菜放宽）----
     notes: List[str] = []
     restrict_list = sorted(restriction_set) if restriction_set else []
@@ -625,15 +793,18 @@ def build_recipe_pool_context(
     # ---- 3) 预算感知排序：预算内靠前，超预算靠后（②）----
     budget = _extract_budget(query)
     if budget is not None:
-        pre = {r.id: r for r in db.query(Recipe).filter(Recipe.id.in_(pool)).all()}
-
         def _cost(rid: int) -> float:
-            r = pre.get(rid)
+            r = recipes.get(rid)
             return float(r.estimated_cost) if r and r.estimated_cost else float("inf")
 
-        in_budget = sorted((rid for rid in pool if _cost(rid) <= budget), key=_cost)
-        over = sorted((rid for rid in pool if _cost(rid) > budget), key=_cost)
-        pool = in_budget + over
+        in_ids = [rid for rid in pool if _cost(rid) <= budget]
+        over_ids = [rid for rid in pool if _cost(rid) > budget]
+        if rerank_scores:
+            # 精排激活：预算分组依旧优先，组内保持精排相关度序
+            pool = in_ids + over_ids
+        else:
+            # 未精排（关闭/降级）：保持原逻辑，组内按成本升序
+            pool = sorted(in_ids, key=_cost) + sorted(over_ids, key=_cost)
         notes.append(
             f"用户预算约为 {budget} 元。请在不超过预算的前提下尽量用足预算"
             f"（总价建议达约 {int(budget * 0.9)}~{budget} 元），"
@@ -641,9 +812,8 @@ def build_recipe_pool_context(
             "总价只依据上表标注的成本逐道累计，不要自估。"
         )
 
-    # ---- 4) 取前 max_dishes 道并加载实际菜谱 ----
+    # ---- 4) 取前 max_dishes 道（菜谱对象已在 1.5 步加载）----
     pool = pool[:max_dishes]
-    recipes = {r.id: r for r in db.query(Recipe).filter(Recipe.id.in_(pool)).all()}
 
     # ---- 5) 拼紧凑文本（信息密度优先，不粘贴冗长步骤）----
     lines = []

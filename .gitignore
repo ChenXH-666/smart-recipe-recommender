@@ -94,6 +94,10 @@ data/
 new_data/
 api_example/
 
+# 检索评测本地实验产物（依赖在线 API，机器相关）
+backend/import_data/eval_rerank_results.md
+backend/import_data/eval_rerank_results.json
+
 # ============================================================
 # 毕业设计文档 / 内部文档 —— 不应上传到公开仓库
 # ============================================================

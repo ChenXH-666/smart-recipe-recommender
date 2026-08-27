@@ -90,8 +90,9 @@ def _get_llm():
     """
     获取 LLM 实例（工厂函数）。
 
-    使用 SiliconFlow 的 DeepSeek-R1-0528-Qwen3-8B 模型，
-    通过 OpenAI 兼容 API 调用。temperature=0.7 在创造性和稳定性之间取得平衡。
+    默认使用小米 Mimo 的 mimo-v2.5 模型（LLM_PROVIDER=mimo 时自动关闭其
+    默认开启的深度思考，只输出最终答案），通过 OpenAI 兼容 API 调用。
+    temperature=0.7 在创造性和稳定性之间取得平衡。
     """
     kwargs = {
         "model": settings.LLM_MODEL,

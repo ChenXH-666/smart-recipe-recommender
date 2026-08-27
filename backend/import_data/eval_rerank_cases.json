@@ -1,0 +1,25 @@
+[
+  {"category": "exact", "query": "清蒸鲈鱼的做法", "relevant_titles": ["清蒸鲈鱼", "葱油鲈鱼", "清蒸鱼"]},
+  {"category": "exact", "query": "东北名菜锅包肉怎么做", "relevant_titles": ["锅包肉"]},
+  {"category": "exact", "query": "麻婆豆腐怎么做好吃", "relevant_titles": ["麻婆豆腐", "家常麻婆豆腐"]},
+  {"category": "exact", "query": "皮蛋瘦肉粥的家常做法", "relevant_titles": ["皮蛋瘦肉粥", "香菇皮蛋瘦肉粥"]},
+  {"category": "exact", "query": "鱼香肉丝经典做法", "relevant_titles": ["鱼香肉丝"]},
+  {"category": "exact", "query": "蒸鸡蛋羹怎么做才嫩", "relevant_titles": ["蒸鸡蛋羹", "滑嫩鸡蛋羹", "微波炉鸡蛋羹"]},
+
+  {"category": "cuisine", "query": "潮汕经典小吃有哪些", "relevant_titles": ["潮汕粿汁", "潮汕蚝仔烙", "潮汕薯粉粿", "潮汕粿肉"]},
+  {"category": "cuisine", "query": "东北菜有哪些经典家常菜", "relevant_titles": ["锅包肉", "地三鲜", "家常地三鲜"]},
+  {"category": "cuisine", "query": "川菜里适合下饭的经典菜", "relevant_titles": ["麻婆豆腐", "回锅肉", "鱼香肉丝", "水煮肉片"]},
+  {"category": "cuisine", "query": "炖一锅排骨汤", "relevant_titles": ["冬瓜排骨汤", "排骨冬瓜汤", "番茄玉米排骨汤", "番茄土豆排骨汤"]},
+  {"category": "cuisine", "query": "早餐喝什么粥养胃", "relevant_titles": ["小米粥", "山药小米粥", "红枣小米粥", "南瓜小米粥"]},
+  {"category": "cuisine", "query": "新手也能做的蛋糕", "relevant_titles": ["蒸蛋糕", "电饭锅蛋糕", "电饭煲蛋糕"]},
+
+  {"category": "scenario", "query": "下班后30分钟搞定的快手家常菜", "relevant_titles": ["西红柿炒鸡蛋", "番茄炒蛋"]},
+  {"category": "scenario", "query": "适合减脂期吃的低油低脂晚餐", "relevant_titles": ["清蒸鲈鱼", "清蒸鱼"]},
+  {"category": "scenario", "query": "家里来客人做什么硬菜有面子", "relevant_titles": ["家常红烧肉", "清蒸鲈鱼", "红烧鹅"]},
+  {"category": "scenario", "query": "给小孩做营养丰富又清淡的一餐", "relevant_titles": ["西红柿炒鸡蛋", "清蒸鲈鱼"]},
+  {"category": "scenario", "query": "夏天没胃口想吃得开胃一点", "relevant_titles": ["凉拌土豆丝", "酸辣土豆丝", "凉拌茄子"]},
+
+  {"category": "budget", "query": "预算100元的东北菜家常菜", "relevant_titles": ["锅包肉", "地三鲜", "家常地三鲜"]},
+  {"category": "budget", "query": "预算500元的潮汕年夜饭菜单", "relevant_titles": ["潮汕卤水", "潮汕牛肉丸", "潮汕粿汁", "潮汕蚝仔烙"]},
+  {"category": "budget", "query": "预算200元的川菜宴客菜单", "relevant_titles": ["水煮肉片", "辣子鸡", "回锅肉", "麻婆豆腐"]}
+]

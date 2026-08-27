@@ -10,7 +10,7 @@
 | 后端 | Python FastAPI + SQLAlchemy + Pydantic |
 | 数据库 | MySQL 8.x |
 | 向量库 | ChromaDB（本地持久化） |
-| 大模型 | 默认 SiliconFlow API（DeepSeek-R1 + BGE-M3 嵌入）；支持通过 `ENV_FILE=` 切换为小米 Mimo（mimo-v2.5，可关闭思考模式），嵌入恒用 SiliconFlow BGE-M3 |
+| 大模型 | LLM 默认小米 Mimo（mimo-v2.5，关闭深度思考）；Embedding/Rerank 恒用 SiliconFlow（BGE-M3 嵌入 + bge-reranker-v2-m3 精排） |
 | 认证 | JWT Token |
 
 ## 功能模块
@@ -22,7 +22,7 @@
 | 用户中心 | 登录注册、收藏管理、浏览历史、AI对话记录、待做清单（近期要做）、菜谱合集（一键生成套餐） |
 | 互动模块 | 菜谱评分点评、烹饪心得分享(创建+浏览) |
 | 智能推荐 | 基于用户历史的个性化推荐、预算筛选推荐、自然语言搜索推荐；新号走冷启动多样推荐、忌口过滤前置 |
-| AI 助手 | 流式多轮对话、RAG 增强菜谱问答、单菜/套餐智能推荐；仅推荐菜谱库内真实菜品，支持用户忌口过滤与预算感知（尽量用足预算） |
+| AI 助手 | 流式多轮对话、RAG 增强菜谱问答（两阶段检索：BGE-M3 粗排召回 + bge-reranker-v2-m3 交叉编码精排，分数融合 α=0.5 微调排序，精排失败自动降级）、单菜/套餐智能推荐；仅推荐菜谱库内真实菜品，支持用户忌口过滤与预算感知（尽量用足预算） |
 | 套餐服务 | 套餐浏览、创建自定义套餐 |
 
 ### 管理端
@@ -93,7 +93,7 @@ Project/
 │   │   ├── config.py      # 配置管理
 │   │   ├── database.py    # 数据库连接
 │   │   └── main.py        # 应用入口
-│   ├── import_data/        # 数据导入脚本
+│   ├── import_data/        # 数据导入脚本（rebuild_vectorstore 向量重建 / eval_rerank 精排论文评测）
 │   ├── tests/              # pytest 单元测试
 │   ├── .env.example        # 环境变量模板
 │   └── requirements.txt    # Python 依赖
@@ -156,10 +156,10 @@ cd backend
 conda activate food
 python -m pytest tests -v --cov=app --cov-report=term-missing
 ```
-单元测试基于 pytest 编写，共 141 个用例，覆盖纯函数 / 模型 / 服务 / 接口四层；测试使用 SQLite 内存库并对 Chroma、LLM 等外部依赖打桩隔离，无需连接真实数据库与模型服务。整体行覆盖率约 58%，核心逻辑（配置、安全、统计、营养、工具函数、AI 引擎）覆盖率 76%~100%。
+单元测试基于 pytest 编写，共 154 个用例，覆盖纯函数 / 模型 / 服务 / 接口四层；测试使用 SQLite 内存库并对 Chroma、LLM 等外部依赖打桩隔离，无需连接真实数据库与模型服务。整体行覆盖率约 59%，核心逻辑（配置、安全、统计、营养、工具函数、AI 引擎）覆盖率 76%~100%。
 
 ## 注意事项
 
-- **API Key 配置**：请在 `backend/.env` 中配置真实的 SiliconFlow API Key，不要将密钥提交到版本控制
+- **API Key 配置**：请在 `backend/.env` 中配置真实的 API Key——LLM 用小米 Mimo Key（`LLM_API_KEY`），Embedding/Rerank 用 SiliconFlow Key（`EMBEDDING_API_KEY`，Rerank 自动复用），不要将密钥提交到版本控制
 - **向量数据库**：ChromaDB 使用本地持久化，数据库文件保存在 `backend/chroma_db/` 目录
 - **默认管理员**：运行导入脚本后自动创建管理员账号 `admin` / `admin123`

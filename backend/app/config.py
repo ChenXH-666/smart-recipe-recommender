@@ -23,6 +23,15 @@
   RAG_CHUNK_OVERLAP = 50 → 相邻块重叠 50 字符，防止关键信息在分块边界处被截断
   RAG_EMBEDDING_BATCH_SIZE = 64 → 每次 Embedding API 最多同时编码 64 个文本块，避免单次请求过大或额度耗尽
   RAG_CHECKPOINT_FILE = "./chroma_db/rebuild_checkpoint.json" → 全量重建向量库时的断点文件，记录已成功的文档 ID
+
+【Rerank 精排参数说明（两阶段检索第二级）】
+  RERANK_ENABLED = True   → 是否启用精排；关闭或调用失败时自动降级为纯召回排序
+  RERANK_MODEL = "BAAI/bge-reranker-v2-m3" → SiliconFlow 提供的交叉编码精排模型，
+    与 Embedding 同一服务账号（复用 EMBEDDING_API_KEY），无需单独部署
+  RERANK_API_KEY = ""     → 留空时自动复用 EMBEDDING_API_KEY（同为 SiliconFlow）
+  RERANK_TIMEOUT = 10     → 精排请求超时秒数，超时即降级，不阻塞对话主链路
+  RERANK_ALPHA = 0.5      → 分数融合权重：最终排序分 = α×精排分 + (1-α)×召回位置分，
+    0=纯召回序、1=纯精排序；默认 0.5 让精排"微调"而非推翻粗排好序，避免相关菜被挤出
 """
 
 import os
@@ -90,16 +99,18 @@ class Settings(BaseSettings):
     EMBEDDING_API_KEY: str = ""  # 必须通过 .env 注入，禁止硬编码
     EMBEDDING_API_URL: str = "https://api.siliconflow.cn/v1/embeddings"
 
-    # LLM（SiliconFlow DeepSeek-R1-0528-Qwen3-8B，支持思考链推理）
-    LLM_PROVIDER: str = "siliconflow"
-    LLM_MODEL: str = "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B"
+    # LLM（默认小米 Mimo mimo-v2.5，走 OpenAI 兼容接口）
+    #   - LLM_PROVIDER=mimo 时自动关闭其默认开启的深度思考（thinking.type=disabled）
+    #   - Embedding / Rerank 恒用 SiliconFlow（EMBEDDING_API_KEY），与 LLM 相互独立
+    LLM_PROVIDER: str = "mimo"
+    LLM_MODEL: str = "mimo-v2.5"
     LLM_API_KEY: str = ""  # 必须通过 .env 注入，禁止硬编码
-    LLM_BASE_URL: str = "https://api.siliconflow.cn/v1"
+    LLM_BASE_URL: str = "https://api.xiaomimimo.com/v1"
     LLM_TEMPERATURE: float = 0.7  # 0.7 平衡创造性与稳定性
     LLM_MAX_TOKENS: int = 4096  # 至少 4096，避免完整菜单/做法输出被截断
     # 是否关闭模型思考模式：部分模型（如 MiMo mimo-v2.5 / mimo-v2.5-pro）默认开启
     # 深度思考（输出 reasoning_content 推理链）。设为 true 时在请求体传 thinking.type=disabled
-    LLM_DISABLE_THINKING: bool = False
+    LLM_DISABLE_THINKING: bool = True
 
     # 菜谱封面图白名单域名（仅允许专业美食网站，符合项目硬约束）
     RECIPE_COVER_WHITELIST: str = "meishichina.com,xiachufang.com,douguo.com,xiangha.com"
@@ -126,6 +137,23 @@ class Settings(BaseSettings):
     RAG_CHAT_MAX_DISHES: int = 12            # 最终喂给模型的去重菜谱上限
     RAG_EMBEDDING_BATCH_SIZE: int = 64       # Embedding API 单次请求最大文本数
     RAG_CHECKPOINT_FILE: str = "./chroma_db/rebuild_checkpoint.json"  # 重建断点文件路径
+
+    # Rerank 精排（两阶段检索第二级：embedding 粗排召回 → cross-encoder 精排重排序）
+    # 仅作用于对话候选池（build_recipe_pool_context），失败/超时自动降级为召回排序
+    RERANK_ENABLED: bool = True
+    RERANK_MODEL: str = "BAAI/bge-reranker-v2-m3"
+    RERANK_API_URL: str = "https://api.siliconflow.cn/v1/rerank"
+    RERANK_API_KEY: str = ""                 # 留空时复用 EMBEDDING_API_KEY（同为 SiliconFlow）
+    RERANK_TIMEOUT: int = 10                 # 精排请求超时（秒），超时降级不阻塞对话
+    RERANK_MAX_CANDIDATES: int = 32          # 送入精排的最大候选菜谱数
+    # 分数融合权重：最终排序分 = α×精排相关分 + (1-α)×embedding 召回位置分。
+    # 0=纯召回序（关闭精排影响），1=纯精排序；默认 0.5 让精排微调而非推翻粗排好序
+    RERANK_ALPHA: float = 0.5
+
+    @property
+    def rerank_api_key(self) -> str:
+        """精排 API Key：未单独配置时复用 Embedding Key（同一 SiliconFlow 账号）"""
+        return self.RERANK_API_KEY or self.EMBEDDING_API_KEY
 
     class Config:
         # 通过环境变量 ENV_FILE 切换配置文件（如 set ENV_FILE=.env-mimo）
