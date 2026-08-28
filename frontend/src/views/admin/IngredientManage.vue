@@ -91,7 +91,7 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import api from '../../api'
+import { admin } from '../../api'
 
 const ingredients = ref([])
 const loading = ref(false)
@@ -119,8 +119,8 @@ const editForm = ref({ id: null, name: '', category: '' })
 async function load() {
   loading.value = true
   try {
-    const res = await api.get('/admin/ingredients', {
-      params: { page: page.value, page_size: pageSize },
+    const res = await admin.ingredients({
+      page: page.value, page_size: pageSize,
     })
     // 后端返回 { total, page, page_size, items }，需取 items 字段
     ingredients.value = Array.isArray(res) ? res : (res.items || [])
@@ -140,7 +140,7 @@ async function addIngredient() {
   const params = { name: newName.value.trim() }
   if (newCategory.value.trim()) params.category = newCategory.value.trim()
   try {
-    await api.post('/admin/ingredients', null, { params })
+    await admin.createIngredient(params)
     ElMessage.closeAll()  // 清除残留 toast，避免与新增成功消息混淆
     ElMessage.success('添加成功')
     newName.value = ''
@@ -170,11 +170,9 @@ async function saveEdit() {
   }
   try {
     // 后端 update_ingredient 接口使用 Query 参数（name/category/image_url），需通过 params 传递
-    await api.put(`/admin/ingredients/${editForm.value.id}`, null, {
-      params: {
-        name: editForm.value.name.trim(),
-        category: editForm.value.category.trim() || undefined,
-      },
+    await admin.updateIngredient(editForm.value.id, {
+      name: editForm.value.name.trim(),
+      category: editForm.value.category.trim() || undefined,
     })
     ElMessage.closeAll()  // 清除残留的"添加成功"toast，避免误显示新增消息
     ElMessage.success('修改成功')
@@ -192,7 +190,7 @@ async function delIngredient(row) {
     return  // 用户点击取消
   }
   try {
-    await api.delete(`/admin/ingredients/${row.id}`)
+    await admin.removeIngredient(row.id)
     ElMessage.closeAll()  // 清除残留的 ElMessageBox 遮罩和 toast
     ElMessage.success('删除成功')
     // 若当前页删除后为空且非第一页，回退一页

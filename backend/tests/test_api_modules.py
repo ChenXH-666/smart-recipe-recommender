@@ -4,6 +4,10 @@
 复用 conftest.client（get_db 注入 SQLite + Chroma stub），
 并通过共享的 db 会话直接播种测试数据，聚焦各模块的主干业务与权限。
 """
+from datetime import datetime
+
+import pytest
+
 from app.models import Recipe, Ingredient, RecipeIngredient
 
 
@@ -92,6 +96,56 @@ class TestUsers:
         assert rec.status_code == 200
         hist = client.get("/api/users/history", headers=_auth(token))
         assert hist.json()["total"] == 1
+
+    def test_browse_history_unique_constraint_guards_duplicates(self, db):
+        """并发兜底：唯一约束 (user_id, recipe_id) 拦截直接重复插入。
+
+        模拟并发竞态的后果——绕过应用层 upsert 直接往表里插两条
+        同 (user_id, recipe_id) 的记录，第二条必须被数据库拒绝；
+        若无唯一约束，该场景会产生重复行（浏览历史列表重复+热度虚增）。
+        """
+        from app.models import UserBrowseHistory
+        from sqlalchemy.exc import IntegrityError
+
+        # 直接用 db session 造数（不走 client，绕开应用层去重）
+        from app.models import User
+        u = User(username="h1", email="h1@x.com", password_hash="x", role="user")
+        db.add(u)
+        db.flush()
+        r = Recipe(title="历史菜", status="approved", is_deleted=0, author_id=u.id)
+        db.add(r)
+        db.flush()
+        db.add(UserBrowseHistory(user_id=u.id, recipe_id=r.id, viewed_at=datetime.now()))
+        db.flush()
+        db.add(UserBrowseHistory(user_id=u.id, recipe_id=r.id, viewed_at=datetime.now()))
+        with pytest.raises(IntegrityError):
+            db.flush()
+        db.rollback()
+
+    def test_add_favorite_race_returns_400_not_500(self, client, db):
+        """并发兜底：重复收藏直接撞唯一约束时返回 400 而非 500。
+
+        应用层先查后插在并发下会双双通过查重，第二个落库由
+        uk_user_fav 唯一约束拦截；接口应把它转成语义一致的 400。
+        """
+        from app.models import UserFavorite
+
+        uid = _register(client)
+        token = _login(client)
+        rid = _approved_recipe(db, uid)
+
+        # 绕过接口先插一条（模拟另一并发请求抢先落库）
+        db.add(UserFavorite(user_id=uid, favorite_type="recipe", favorite_id=rid))
+        db.commit()
+
+        # 此接口内 SELECT 查不到（commit 后 session 过期会重新查询，
+        # 实际能查到则走 400 已收藏；查不到则 flush 撞约束走 IntegrityError
+        # 分支——两条路径都应返回 400，绝不允许 500）
+        r = client.post("/api/users/favorites",
+                        params={"favorite_type": "recipe", "favorite_id": rid},
+                        headers=_auth(token))
+        assert r.status_code == 400
+        assert "已收藏" in r.json()["message"]
 
 
 # ------------------------------- 点评 -------------------------------

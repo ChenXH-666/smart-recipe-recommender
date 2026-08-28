@@ -169,9 +169,24 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 
 
 # 静态文件服务：提供本地生成的菜谱封面图
+# 子类目的：为封面图加长缓存头。600+ 张 recipe_{id}.jpg 为一次性生成内容，
+# 文件名固定、内容不变；默认情况下浏览器每次页面加载都会对每张图发条件请求
+# （If-Modified-Since 协商，即使服务器只回 304 也要一个网络来回），
+# 首页/列表页大量封面图会带来明显的重复网络开销。加上
+# Cache-Control: public, max-age=86400 后，浏览器 24 小时内直接使用本地缓存、
+# 不再发请求；若重新生成封面，用户最多 1 天后看到新图（或 Ctrl+F5 立即刷新）。
+class CachedStaticFiles(StaticFiles):
+    """带长缓存 Cache-Control 头的静态文件服务"""
+
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "public, max-age=86400"
+        return response
+
+
 static_dir = Path(__file__).parent.parent / "static"
 static_dir.mkdir(exist_ok=True)
-app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+app.mount("/static", CachedStaticFiles(directory=str(static_dir)), name="static")
 
 # 注册路由模块
 app.include_router(auth.router, prefix="/api/auth", tags=["认证"])

@@ -11,7 +11,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import update, func
-from datetime import datetime
+from sqlalchemy.exc import IntegrityError
 
 from app.database import get_db
 from app.models import (
@@ -25,8 +25,33 @@ from app.schemas.ai import AiConversationOut, AiConversationDetailOut
 from app.schemas.common import PaginatedResponse, SuccessResponse
 from app.core.deps import get_current_user
 from app.core.security import verify_password, hash_password
+from app.utils.browse_history import upsert_browse_history
 
 router = APIRouter()
+
+
+def _delete_favorite_and_sync_count(db: Session, fav: UserFavorite) -> None:
+    """
+    删除收藏记录并同步递减对应对象的 favorite_count。
+
+    两个取消收藏接口（按记录 ID / 按业务类型+ID）的公共收尾逻辑：
+      - favorite_count 使用原子 UPDATE 并带 > 0 条件，防止并发下减成负数
+      - 删除记录并提交事务
+    """
+    if fav.favorite_type == "recipe":
+        db.execute(
+            update(Recipe)
+            .where(Recipe.id == fav.favorite_id, Recipe.favorite_count > 0)
+            .values(favorite_count=Recipe.favorite_count - 1)
+        )
+    else:
+        db.execute(
+            update(MealPlan)
+            .where(MealPlan.id == fav.favorite_id, MealPlan.favorite_count > 0)
+            .values(favorite_count=MealPlan.favorite_count - 1)
+        )
+    db.delete(fav)
+    db.commit()
 
 
 def _validate_favorite_target(db: Session, favorite_type: str, favorite_id: int) -> None:
@@ -156,7 +181,15 @@ def add_favorite(
         favorite_id=favorite_id,
     )
     db.add(fav)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError:
+        # 并发兜底：同一用户双击收藏按钮时，两个请求都通过了上方的
+        # SELECT 查重；第二个 flush 撞 uk_user_fav 唯一约束说明对方已
+        # 抢先插入成功。回滚本事务（其中只有这条插入，无其他变更），
+        # 按串行路径同样的语义返回 400"已收藏"，避免 500 吓到用户。
+        db.rollback()
+        raise HTTPException(status_code=400, detail="已收藏")
 
     # 同步 favorite_count +1（原子 UPDATE）
     if favorite_type == "recipe":
@@ -189,21 +222,7 @@ def remove_favorite(
     if not fav:
         raise HTTPException(status_code=404, detail="收藏不存在")
 
-    # 同步 favorite_count -1（原子 UPDATE，防止负数）
-    if fav.favorite_type == "recipe":
-        db.execute(
-            update(Recipe)
-            .where(Recipe.id == fav.favorite_id, Recipe.favorite_count > 0)
-            .values(favorite_count=Recipe.favorite_count - 1)
-        )
-    else:
-        db.execute(
-            update(MealPlan)
-            .where(MealPlan.id == fav.favorite_id, MealPlan.favorite_count > 0)
-            .values(favorite_count=MealPlan.favorite_count - 1)
-        )
-    db.delete(fav)
-    db.commit()
+    _delete_favorite_and_sync_count(db, fav)
     return SuccessResponse(message="已取消收藏")
 
 
@@ -225,21 +244,7 @@ def remove_favorite_by_item(
     if not fav:
         raise HTTPException(status_code=404, detail="收藏不存在")
 
-    # 同步 favorite_count -1
-    if item_type == "recipe":
-        db.execute(
-            update(Recipe)
-            .where(Recipe.id == item_id, Recipe.favorite_count > 0)
-            .values(favorite_count=Recipe.favorite_count - 1)
-        )
-    else:
-        db.execute(
-            update(MealPlan)
-            .where(MealPlan.id == item_id, MealPlan.favorite_count > 0)
-            .values(favorite_count=MealPlan.favorite_count - 1)
-        )
-    db.delete(fav)
-    db.commit()
+    _delete_favorite_and_sync_count(db, fav)
     return SuccessResponse(message="已取消收藏")
 
 
@@ -367,25 +372,11 @@ def record_browse_history(
         if not obj:
             raise HTTPException(status_code=400, detail="套餐不存在")
 
-    # 去重：单用户单对象只保留最近一条记录
-    now = datetime.now()
-    query = db.query(UserBrowseHistory).filter(
-        UserBrowseHistory.user_id == current_user.id
+    # 去重写入：单用户单对象只保留最近一条记录（公共 upsert，与菜谱详情页共用）
+    upsert_browse_history(
+        db, current_user.id,
+        recipe_id=recipe_id, meal_plan_id=meal_plan_id,
     )
-    if recipe_id is not None:
-        query = query.filter(UserBrowseHistory.recipe_id == recipe_id)
-    else:
-        query = query.filter(UserBrowseHistory.meal_plan_id == meal_plan_id)
-    existing = query.first()
-    if existing:
-        existing.viewed_at = now
-    else:
-        db.add(UserBrowseHistory(
-            user_id=current_user.id,
-            recipe_id=recipe_id,
-            meal_plan_id=meal_plan_id,
-            viewed_at=now,
-        ))
     db.commit()
     return SuccessResponse(message="已记录")
 
@@ -467,33 +458,74 @@ def get_conversations(
 ):
     """获取 AI 对话历史列表 —— 按更新时间倒序
 
-    性能优化：joinedload 预加载 messages，避免循环内 N+1 查询。
+    性能优化：原实现 joinedload 拉出每会话的全部消息，只为取首条用户提问
+    与最后一条 AI 回复两条摘要——长会话（几十上百条消息）时单页 20 个会话
+    要加载上千行。现改为三步批量查询，加载行数与会话长度无关：
+      ① 分页取会话（不预加载消息）
+      ② 按会话+角色分组聚合 min/max 消息 ID（即首条 user / 末条 assistant）
+      ③ 仅按这至多 2×page_size 个 ID 批量取消息内容
+    消息 ID 为自增主键、按写入顺序分配，与 created_at 顺序一致，
+    故 ID 最小/最大即时间最早/最晚。
     每条会话附带首条用户提问（user_message）与最后一条 AI 回复（ai_reply），
     供前端卡片直接展示气泡与摘要。
     """
-    from sqlalchemy.orm import joinedload
-    query = db.query(AiConversation).options(
-        joinedload(AiConversation.messages)
-    ).filter(AiConversation.user_id == current_user.id)
+    query = db.query(AiConversation).filter(AiConversation.user_id == current_user.id)
     total = query.count()
-    convs = query.order_by(AiConversation.updated_at.desc()).offset((page - 1) * page_size).limit(page_size).all()
+    convs = (
+        query.order_by(AiConversation.updated_at.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
 
     items = []
-    for c in convs:
-        item = AiConversationOut.model_validate(c)
-        user_msgs = sorted(
-            (m for m in c.messages if m.role == "user"),
-            key=lambda m: m.created_at,
+    conv_ids = [c.id for c in convs]
+    if conv_ids:
+        # ② 每会话分角色的消息 ID 边界：min=首条、max=末条
+        role_bounds = {}
+        rows = (
+            db.query(
+                AiMessage.conversation_id,
+                AiMessage.role,
+                func.min(AiMessage.id),
+                func.max(AiMessage.id),
+            )
+            .filter(AiMessage.conversation_id.in_(conv_ids))
+            .group_by(AiMessage.conversation_id, AiMessage.role)
+            .all()
         )
-        ai_msgs = sorted(
-            (m for m in c.messages if m.role == "assistant"),
-            key=lambda m: m.created_at,
-        )
-        if user_msgs:
-            item.user_message = user_msgs[0].content
-        if ai_msgs:
-            item.ai_reply = ai_msgs[-1].content
-        items.append(item)
+        for conv_id, role, min_id, max_id in rows:
+            role_bounds[(conv_id, role)] = (min_id, max_id)
+
+        # ③ 只取摘要需要的消息内容：首条 user + 末条 assistant
+        wanted_ids = set()
+        for conv_id in conv_ids:
+            ub = role_bounds.get((conv_id, "user"))
+            if ub:
+                wanted_ids.add(ub[0])
+            ab = role_bounds.get((conv_id, "assistant"))
+            if ab:
+                wanted_ids.add(ab[1])
+        msg_map = {}
+        if wanted_ids:
+            msg_map = {
+                m.id: m
+                for m in db.query(AiMessage).filter(AiMessage.id.in_(wanted_ids)).all()
+            }
+
+        for c in convs:
+            item = AiConversationOut.model_validate(c)
+            ub = role_bounds.get((c.id, "user"))
+            if ub:
+                m = msg_map.get(ub[0])
+                if m:
+                    item.user_message = m.content
+            ab = role_bounds.get((c.id, "assistant"))
+            if ab:
+                m = msg_map.get(ab[1])
+                if m:
+                    item.ai_reply = m.content
+            items.append(item)
 
     return PaginatedResponse(
         total=total, page=page, page_size=page_size,

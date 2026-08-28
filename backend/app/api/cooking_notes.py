@@ -7,7 +7,7 @@
   - 软删除策略，保护数据完整性
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import or_, update
 
@@ -22,7 +22,7 @@ from app.schemas.interaction import (
 )
 from app.schemas.common import PaginatedResponse, SuccessResponse
 from app.core.deps import get_current_user, get_optional_user
-from app.services.rag_service import sync_cooking_note_to_chroma, remove_from_chroma
+from app.services.rag_service import sync_cooking_note_to_chroma_by_id, remove_from_chroma
 
 router = APIRouter()
 
@@ -141,6 +141,7 @@ def get_note(
 @router.post("", response_model=CookingNoteOut, status_code=201)
 def create_note(
     data: CookingNoteCreate,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
@@ -167,12 +168,10 @@ def create_note(
     db.commit()
     db.refresh(note)
 
-    # 仅公开心得入向量库 —— 私密心得内容不应被 RAG 检索后经由 AI 引用给其他用户
+    # 仅公开心得入向量库（后台执行，不阻塞创建响应）—— 私密心得内容
+    # 不应被 RAG 检索后经由 AI 引用给其他用户
     if note.is_public:
-        try:
-            sync_cooking_note_to_chroma(note)
-        except Exception:
-            pass
+        background_tasks.add_task(sync_cooking_note_to_chroma_by_id, note.id)
 
     return _enrich_note(note)
 
@@ -181,6 +180,7 @@ def create_note(
 def update_note(
     note_id: int,
     data: CookingNoteUpdate,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
@@ -210,15 +210,12 @@ def update_note(
     db.commit()
     db.refresh(note)
 
-    # 向量库一致性：公开心得同步更新；改为私密的立即移除既有分块，
-    # 防止旧的公开分块仍可被 RAG 检索到
+    # 向量库一致性（后台执行，不阻塞更新响应）：公开心得同步更新；
+    # 改为私密的立即移除既有分块，防止旧的公开分块仍可被 RAG 检索到
     if note.is_public:
-        try:
-            sync_cooking_note_to_chroma(note)
-        except Exception:
-            pass
+        background_tasks.add_task(sync_cooking_note_to_chroma_by_id, note.id)
     else:
-        remove_from_chroma("cooking_note", note.id)
+        background_tasks.add_task(remove_from_chroma, "cooking_note", note.id)
 
     return _enrich_note(note)
 
@@ -226,6 +223,7 @@ def update_note(
 @router.delete("/{note_id}", response_model=SuccessResponse)
 def delete_note(
     note_id: int,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
@@ -241,7 +239,7 @@ def delete_note(
     note.is_deleted = 1
     db.commit()
 
-    remove_from_chroma("cooking_note", note.id)
+    background_tasks.add_task(remove_from_chroma, "cooking_note", note.id)
 
     return SuccessResponse(message="删除成功")
 

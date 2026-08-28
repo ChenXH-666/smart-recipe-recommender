@@ -47,7 +47,10 @@
           <div class="msg-body">
             <div class="msg-bubble">
               <!-- 用户与 AI 消息统一用 Markdown 渲染，并去除内容首尾多余空行 -->
-              <div class="markdown-body" v-html="renderMsg(msg.content)"></div>
+              <!-- html 为进列表时预计算的结果：v-for 中的 v-html 若直接调方法，
+                   流式期间每个 chunk 触发重渲染都会对所有历史消息重新执行
+                   marked.parse + DOMPurify.sanitize，长对话时明显卡顿 -->
+              <div class="markdown-body" v-html="msg.html"></div>
             </div>
             <!-- 用户消息支持"任意位置重答"：编辑该条 → 删除其后所有消息并重新生成 -->
             <div v-if="msg.role === 'user' && editingIndex !== idx" class="msg-tools">
@@ -149,7 +152,7 @@ import { renderMarkdown } from '../utils/markdown'
 // SSE 流式读取与 token 校验统一走公共工具
 import { streamSSE } from '../utils/sse'
 import { getAuthToken } from '../utils/auth'
-import api from '../api'
+import { recommendations, users, ai } from '../api'
 import { useAiChatStore } from '../stores/aiChat'
 
 const props = defineProps({ visible: Boolean })
@@ -182,10 +185,14 @@ const quickTips = ref([
 // 渲染消息：先去除内容首尾的多余空白/换行，再走 Markdown 渲染，避免前后出现空白行
 const renderMsg = (t) => renderMarkdown((t || '').trim())
 
+// 包装消息：进入列表时预计算 Markdown HTML（历史消息渲染一次即缓存复用，
+// 流式重渲染不再重复解析；流式中的 streamText 仍逐 chunk 渲染，属打字机必要开销）
+const withHtml = (m) => ({ ...m, html: renderMsg(m.content) })
+
 // 打开抽屉时加载个性化"猜你想问"预设备题（登录后按用户偏好动态生成）
 async function loadQuickTips() {
   try {
-    const res = await api.get('/recommendations/prompts', { params: { limit: 6 } })
+    const res = await recommendations.prompts({ limit: 6 })
     if (res.items && res.items.length) quickTips.value = res.items
   } catch (e) {
     console.error(e)
@@ -195,9 +202,9 @@ async function loadQuickTips() {
 // 载入指定历史会话的消息，并把 conversationId 设为该会话，后续提问自动续接上下文
 async function loadConversationMessages(convId) {
   try {
-    const res = await api.get(`/users/conversations/${convId}`)
+    const res = await users.conversationDetail(convId)
     conversationId.value = convId
-    messages.value = res.messages || []
+    messages.value = (res.messages || []).map(withHtml)
     nextTick(scrollToBottom)
   } catch (e) {
     console.error(e)
@@ -266,7 +273,7 @@ function abortStream() {
   if (streaming.value) {
     // 将已接收的流文本作为 AI 回复保留
     if (streamText.value) {
-      messages.value.push({ role: 'assistant', content: streamText.value + '\n\n_(已中断)_' })
+      messages.value.push(withHtml({ role: 'assistant', content: streamText.value + '\n\n_(已中断)_' }))
     }
     streamText.value = ''
     streaming.value = false
@@ -284,7 +291,7 @@ async function sendMessage() {
     return
   }
 
-  messages.value.push({ role: 'user', content: text })
+  messages.value.push(withHtml({ role: 'user', content: text }))
   inputText.value = ''
   streaming.value = true
   streamText.value = ''
@@ -307,7 +314,7 @@ async function sendMessage() {
       },
       onDone: () => {
         // 流结束：将累积的流文本作为 AI 回复保留
-        messages.value.push({ role: 'assistant', content: streamText.value })
+        messages.value.push(withHtml({ role: 'assistant', content: streamText.value }))
         streamText.value = ''
         streaming.value = false
         abortController = null
@@ -319,7 +326,7 @@ async function sendMessage() {
     // 兜底：流自然结束但未触发 onDone 时收敛 UI 状态
     if (streaming.value) {
       if (streamText.value) {
-        messages.value.push({ role: 'assistant', content: streamText.value })
+        messages.value.push(withHtml({ role: 'assistant', content: streamText.value }))
       }
       streamText.value = ''
       streaming.value = false
@@ -335,7 +342,7 @@ async function sendMessage() {
     }
     // 记录真实原因到控制台，便于排查（如网络/热重载导致的流中断）
     console.error('AI 流式对话失败:', e)
-    messages.value.push({ role: 'assistant', content: 'AI 服务暂时不可用，请稍后再试。' })
+    messages.value.push(withHtml({ role: 'assistant', content: 'AI 服务暂时不可用，请稍后重试。' }))
     streaming.value = false
     abortController = null
   }
@@ -366,14 +373,14 @@ async function confirmEdit() {
 
   try {
     // 重新拉取权威会话列表，拿到该位置用户消息的真实 id（新发送的消息本地可能没有 id）
-    const detail = await api.get(`/users/conversations/${conversationId.value}`)
+    const detail = await users.conversationDetail(conversationId.value)
     const serverMsgs = detail.messages || []
     const target = serverMsgs[idx]
     if (!target || target.role !== 'user') {
       ElMessage.warning('该消息暂不可编辑')
       return
     }
-    await api.post(`/ai/conversations/${conversationId.value}/rewind-edit`, {
+    await ai.rewindEdit(conversationId.value, {
       message_id: target.id,
       new_content: text,
     })

@@ -130,7 +130,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useUserStore } from '../stores/user'
-import api from '../api'
+import { recipes, users, recommendations, mealPlans as mealPlansApi, stats as statsApi } from '../api'
 import RecipeCard from '../components/RecipeCard.vue'
 
 const router = useRouter()
@@ -159,49 +159,50 @@ function handleSearch() {
 }
 
 async function loadData() {
-  try {
-    // 推荐套餐：登录用户走 RAG 个性化评估接口，未登录用户走公开套餐列表
-    const plansPromise = userStore.isLoggedIn
-      ? api.get('/recommendations/meal-plans', { params: { limit: 6 } })
-      : api.get('/meal-plans', { params: { page_size: 6 } })
-    const [hotRes, plansRes] = await Promise.all([
-      api.get('/recipes/hot', { params: { page_size: 8 } }),
-      plansPromise,
-    ])
-    hotRecipes.value = hotRes.items || []
-    mealPlans.value = plansRes.items || []
-    // 若统计接口未返回（如启动中），先用列表 total 兜底
-    if (!stats.value.total_recipes && !stats.value.total_meal_plans) {
-      stats.value.total_recipes = hotRes.total || hotRecipes.value.length
-      stats.value.total_meal_plans = plansRes.total || mealPlans.value.length
-    }
-  } catch (e) {
-    console.error(e)
-  }
+  // 5 路请求并行发起，但各自完成后立即渲染（快的先上屏，慢的不拖累快的），
+  // 保持与原串行版一致的渲染节奏（热门菜谱先出、个性化推荐后补），
+  // 总耗时等于最慢一路，而非各路之和。
+  // 各接口互不依赖：个性化推荐由服务端从数据库读用户行为/忌口，
+  // /users/preferences 仅用于顶部忌口提示条文案。
+  const loggedIn = userStore.isLoggedIn
+
+  const hotP = recipes.hot({ page_size: 8 })
+    .then(res => { hotRecipes.value = res.items || []; return res })
+    .catch(e => { console.error(e); return null })
+
+  // 推荐套餐：登录用户走 RAG 个性化评估接口，未登录用户走公开套餐列表
+  const plansP = (loggedIn
+    ? recommendations.mealPlans({ limit: 6 })
+    : mealPlansApi.list({ page_size: 6 })
+  )
+    .then(res => { mealPlans.value = res.items || []; return res })
+    .catch(e => { console.error(e); return null })
+
   // 首页统计卡片（独立接口，失败不影响主内容展示）
-  try {
-    const res = await api.get('/stats')
-    stats.value = res || stats.value
-  } catch (e) {
-    console.error(e)
+  const statsP = statsApi.home()
+    .then(res => { if (res) stats.value = res; return res })
+    .catch(e => { console.error(e); return null })
+
+  if (loggedIn) {
+    // 忌口偏好：仅用于顶部"已按你的忌口过滤"提示条文案
+    users.getPreferences()
+      .then(async prefs => {
+        if (prefs && prefs.diet_tags && prefs.diet_tags.length) {
+          const { formatDietTags } = await import('../utils/diet')
+          restrictionText.value = formatDietTags(prefs.diet_tags)
+        }
+      })
+      .catch(e => console.error(e))
+    recommendations.personalized({ limit: 8 })
+      .then(res => { personalizedItems.value = res.items || [] })
+      .catch(e => console.error(e))
   }
-  if (userStore.isLoggedIn) {
-    // 读取忌口偏好，用于顶部"已按你的忌口过滤"提示条
-    try {
-      const prefs = await api.get('/users/preferences')
-      if (prefs.diet_tags && prefs.diet_tags.length) {
-        const { formatDietTags } = await import('../utils/diet')
-        restrictionText.value = formatDietTags(prefs.diet_tags)
-      }
-    } catch (e) {
-      console.error(e)
-    }
-    try {
-      const res = await api.get('/recommendations/personalized', { params: { limit: 8 } })
-      personalizedItems.value = res.items || []
-    } catch (e) {
-      console.error(e)
-    }
+
+  // 统计兜底需要热门/套餐接口的 total 字段，等这三路回来后补齐（仅统计接口失败时）
+  const [hotRes, plansRes, statsRes] = await Promise.all([hotP, plansP, statsP])
+  if (!statsRes) {
+    stats.value.total_recipes = (hotRes && hotRes.total) || hotRecipes.value.length
+    stats.value.total_meal_plans = (plansRes && plansRes.total) || mealPlans.value.length
   }
 }
 

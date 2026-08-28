@@ -110,7 +110,7 @@
  */
 import { ref, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import api from '../../api'
+import { users, ai } from '../../api'
 import { useAiChatStore } from '../../stores/aiChat'
 import { renderMarkdown } from '../../utils/markdown'
 
@@ -137,7 +137,7 @@ function formatDate(d) {
 async function load() {
   loading.value = true
   try {
-    const res = await api.get('/users/conversations', { params: { page: page.value, page_size: pageSize } })
+    const res = await users.conversations({ page: page.value, page_size: pageSize })
     items.value = res.items || []
     total.value = res.total || 0
   } catch (e) {
@@ -149,7 +149,7 @@ async function load() {
 
 async function showDetail(id) {
   try {
-    const res = await api.get(`/users/conversations/${id}`)
+    const res = await users.conversationDetail(id)
     detailMessages.value = res.messages || []
     dialogVisible.value = true
   } catch (e) {
@@ -182,7 +182,7 @@ async function onDeleteCheck(conv, val) {
     return
   }
   try {
-    await api.delete(`/ai/conversations/${conv.id}`)
+    await ai.deleteConversation(conv.id)
     ElMessage.closeAll()  // 清除残留的 ElMessageBox 遮罩和 toast
     ElMessage.success('会话已删除')
     selectedId.value = null

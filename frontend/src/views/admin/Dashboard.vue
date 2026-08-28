@@ -59,7 +59,7 @@
  */
 import { ref, onMounted } from 'vue'
 import { DishDot, Collection, PriceTag, Food, User, Document, DataAnalysis, Menu } from '@element-plus/icons-vue'
-import api from '../../api'
+import { admin } from '../../api'
 
 const loading = ref(true)
 const stats = ref({ recipes: 0, pendingRecipes: 0, pendingPlans: 0, users: 0, totalPlans: 0, totalTags: 0, totalIngredients: 0 })
@@ -88,7 +88,7 @@ const links = [
 
 onMounted(async () => {
   try {
-    const res = await api.get('/admin/stats')
+    const res = await admin.stats()
     stats.value = {
       recipes: res.total_recipes || 0,
       pendingRecipes: res.pending_recipes || 0,

@@ -54,7 +54,7 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import api from '../../api'
+import { mealPlans } from '../../api'
 
 const statusFilter = ref('')
 const items = ref([])
@@ -91,7 +91,7 @@ async function load() {
   try {
     const params = { mine: 1, page: page.value, page_size: pageSize }
     if (statusFilter.value) params.status = statusFilter.value
-    const res = await api.get('/meal-plans', { params })
+    const res = await mealPlans.list(params)
     items.value = res.items || []
     total.value = res.total || 0
   } catch (e) { console.error(e) }
@@ -108,7 +108,7 @@ function setFilter(v) {
 async function remove(p) {
   const ok = await ElMessageBox.confirm(`确定删除套餐「${p.title}」吗？`, '提示', { type: 'warning' }).catch(() => false)
   if (!ok) return
-  await api.delete(`/meal-plans/${p.id}`)
+  await mealPlans.remove(p.id)
   ElMessage.success('已删除')
   load()
 }

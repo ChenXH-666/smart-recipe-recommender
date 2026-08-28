@@ -11,7 +11,7 @@
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import update
 
@@ -21,7 +21,7 @@ from app.schemas.admin import AuditAction, AdminRecipeListOut, AdminMealPlanList
 from app.schemas.recipe import RecipeDetail, RecipeUpdate
 from app.schemas.common import PaginatedResponse, SuccessResponse
 from app.core.deps import get_admin_user
-from app.services.rag_service import sync_recipe_to_chroma, remove_from_chroma
+from app.services.rag_service import sync_recipe_to_chroma_by_id, remove_from_chroma
 
 router = APIRouter()
 
@@ -265,6 +265,7 @@ def list_pending_recipes(
 def audit_recipe(
     recipe_id: int,
     data: AuditAction,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     admin=Depends(get_admin_user),
 ):
@@ -272,7 +273,7 @@ def audit_recipe(
     审核菜谱 —— 管理员执行 approve/reject 操作。
     记录审核人、审核意见、审核时间，用于审核追踪。
 
-    向量库一致性：
+    向量库一致性（后台任务执行，Embedding 耗时不再阻塞审核响应）：
       - approve：菜谱入库向量库，供 RAG 检索（普通用户创建时 pending 未同步，此处补齐）
       - reject：从向量库移除分块，避免被驳回内容继续参与 RAG
     """
@@ -293,15 +294,11 @@ def audit_recipe(
     recipe.reviewed_at = datetime.now()
     db.commit()
 
-    # 审核通过 → 同步入向量库；驳回 → 从向量库移除（失败不影响审核主流程）
-    try:
-        if data.action == "approve":
-            db.refresh(recipe)
-            sync_recipe_to_chroma(recipe)
-        else:
-            remove_from_chroma("recipe", recipe.id)
-    except Exception:
-        pass
+    # 审核通过 → 后台同步入向量库；驳回 → 后台移除分块（失败仅记日志，不影响审核结果）
+    if data.action == "approve":
+        background_tasks.add_task(sync_recipe_to_chroma_by_id, recipe.id)
+    else:
+        background_tasks.add_task(remove_from_chroma, "recipe", recipe.id)
 
     return SuccessResponse(message=f"已{'批准' if data.action == 'approve' else '驳回'}")
 
@@ -309,6 +306,7 @@ def audit_recipe(
 @router.delete("/recipes/{recipe_id}", response_model=SuccessResponse)
 def admin_delete_recipe(
     recipe_id: int,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     admin=Depends(get_admin_user),
 ):
@@ -319,7 +317,7 @@ def admin_delete_recipe(
     recipe.is_deleted = 1
     db.commit()
 
-    remove_from_chroma("recipe", recipe.id)
+    background_tasks.add_task(remove_from_chroma, "recipe", recipe.id)
 
     return SuccessResponse(message="删除成功")
 

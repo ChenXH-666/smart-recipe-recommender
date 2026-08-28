@@ -19,7 +19,7 @@ from app.models import AiConversation, AiMessage
 from app.schemas.ai import AiChatRequest, RewindEditRequest
 from app.schemas.common import SuccessResponse
 from app.core.deps import get_current_user
-from app.services.ai_service import chat_stream, load_memory_from_db, clear_memory
+from app.services.ai_service import chat_stream, load_memory_from_db, clear_memory, has_memory
 from app.utils.recipe_diet import get_restriction_set
 
 router = APIRouter()
@@ -63,11 +63,16 @@ async def ai_chat(
             raise HTTPException(status_code=500, detail="会话创建失败")
         conversation_id = conv.id
 
-    # 从数据库加载历史消息到内存
-    messages = db.query(AiMessage).filter(
-        AiMessage.conversation_id == conversation_id
-    ).order_by(AiMessage.created_at.asc()).all()
-    load_memory_from_db(conversation_id, messages)
+    # 从数据库加载历史消息到内存 —— 仅缓存未命中时执行。
+    # 命中即跳过：内存与 DB 由同一链路同步维护（本轮用户消息在下方先写 DB、
+    # AI 回复流结束后同时写 DB 与 memory；rewind_edit/删除会话显式清缓存；
+    # LRU 淘汰后键消失，自然回到 miss 路径），跳过可省去每轮对话一次
+    # 全量历史查询 + memory 重建（长会话时逐轮开销线性增长）。
+    if not has_memory(conversation_id):
+        messages = db.query(AiMessage).filter(
+            AiMessage.conversation_id == conversation_id
+        ).order_by(AiMessage.created_at.asc(), AiMessage.id.asc()).all()
+        load_memory_from_db(conversation_id, messages)
 
     # 保存用户消息（在返回响应前完成，此时 session 仍有效）
     user_msg = AiMessage(

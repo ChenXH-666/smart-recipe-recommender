@@ -35,6 +35,7 @@ AI 对话引擎 —— LLM 调用、流式对话、对话记忆管理
   使 AI 能够基于实际菜谱知识进行回答。
 """
 
+import asyncio
 import logging
 from collections import OrderedDict
 from typing import AsyncGenerator, List, Dict
@@ -86,14 +87,25 @@ def _get_or_create_memory(conversation_id: int) -> ConversationBufferMemory:
     return memory
 
 
+# LLM 客户端单例 —— ChatOpenAI 底层封装 openai SDK 的 httpx 异步客户端
+# （自带连接池），复用同一实例可避免每轮对话重建客户端、重复 TCP/TLS 握手。
+# 配置读取自进程启动时加载的 settings（运行期不变，热更新需求出现前缓存安全）；
+# 测试通过 monkeypatch 整个 _get_llm 注入假 LLM，不受单例影响。
+_llm_instance = None
+
+
 def _get_llm():
     """
-    获取 LLM 实例（工厂函数）。
+    获取 LLM 实例（单例缓存，见 _llm_instance 注释）。
 
     默认使用小米 Mimo 的 mimo-v2.5 模型（LLM_PROVIDER=mimo 时自动关闭其
     默认开启的深度思考，只输出最终答案），通过 OpenAI 兼容 API 调用。
     temperature=0.7 在创造性和稳定性之间取得平衡。
     """
+    global _llm_instance
+    if _llm_instance is not None:
+        return _llm_instance
+
     kwargs = {
         "model": settings.LLM_MODEL,
         "temperature": settings.LLM_TEMPERATURE,
@@ -110,7 +122,8 @@ def _get_llm():
         # 该分支仅当 LLM_PROVIDER=mimo 时生效，切换回 SiliconFlow 天然不会误传。
         kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
 
-    return ChatOpenAI(**kwargs)
+    _llm_instance = ChatOpenAI(**kwargs)
+    return _llm_instance
 
 
 def load_memory_from_db(conversation_id: int, messages: List):
@@ -130,6 +143,17 @@ def load_memory_from_db(conversation_id: int, messages: List):
 def clear_memory(conversation_id: int):
     """清除指定会话的内存上下文（不影响数据库记录）"""
     _conversation_memories.pop(conversation_id, None)
+
+
+def has_memory(conversation_id: int) -> bool:
+    """
+    会话记忆是否已加载在内存缓存中。
+
+    供 ai.py 判断是否需要从 DB 全量重载历史：缓存命中时跳过重载
+    （内存与 DB 由同一链路同步写入，见 chat_stream；rewind_edit/删除
+    会话时会显式失效缓存，LRU 淘汰后键也会消失，均会走 miss 路径重载）。
+    """
+    return conversation_id in _conversation_memories
 
 
 # 系统提示词 —— 控制 AI 的角色行为和回答风格
@@ -216,6 +240,8 @@ async def chat_stream(
       - 只保留最近 10 轮历史，避免 context 窗口溢出和 token 浪费
       - 系统提示词保持静态稳定前缀以便提示词缓存命中；动态内容放用户消息尾部
       - RAG 失败不影响主流程，降级为纯 LLM 回答
+      - RAG 检索（含同步 Embedding/Rerank HTTP 调用）经 asyncio.to_thread 放入
+        线程池执行，不阻塞事件循环，检索期间其他接口正常服务
       - restriction_set：当前用户忌口标签集合，RAG 候选会先被程序剔除触忌口的菜谱
       - db：用于加载候选菜谱与忌口过滤；为空时退回旧的分块拼接逻辑
       - 流式输出时逐字符 yield，前端实现打字机效果
@@ -225,17 +251,24 @@ async def chat_stream(
 
     # RAG 检索 —— 召回较多候选，按菜谱去重并剔除用户忌口后，输出紧凑候选池
     # 若用户在为他人做菜（消息命中"给…/请客/招待"等表达），不硬性拦截其本人忌口
+    # ⚠ build_recipe_pool_context 内部含同步 HTTP 调用（Embedding 最长 30s + Rerank 10s），
+    #   直接在事件循环里执行会阻塞全站所有请求 1~40 秒；用 asyncio.to_thread 放入
+    #   线程池执行，期间其他用户的请求正常处理。db 会话在工作线程中独占使用
+    #   （事件循环线程此期间不触碰该会话），符合 SQLAlchemy 单线程会话约束。
     context = ""
     if use_rag and db is not None:
-        context = build_recipe_pool_context(
+        context = await asyncio.to_thread(
+            build_recipe_pool_context,
             db,
             message,
             restriction_set=restriction_set,
             relax_restriction=_is_cooking_for_others(message),
         )
     elif use_rag:
-        # 兜底：无 db 时退回旧的分块拼接（仅测试/异常场景）
-        search_results = rag_search(message, top_k=settings.RAG_TOP_K * 2)
+        # 兜底：无 db 时退回旧的分块拼接（仅测试/异常场景），同样放入线程池
+        search_results = await asyncio.to_thread(
+            rag_search, message, top_k=settings.RAG_TOP_K * 2
+        )
         context = _build_context_from_rag(search_results)
 
     # 构建消息列表 —— 缓存友好顺序：

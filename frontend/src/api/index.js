@@ -88,13 +88,18 @@ export default api
 
 // ─────────────────────────────────────────────────────────────
 // 命名端点函数（集中管理后端 API 路径，便于维护与重构）
-// 组件可按需导入使用，如 `import { recipes } from '@/api'`
-// 现有组件中的 api.get('/...') 字面量调用仍可继续工作，逐步迁移即可
+// 组件统一按需导入使用，如 `import { recipes, users } from '../api'`
+// 约定：所有路径只在此文件出现一次，views/stores 一律调用命名端点，
+//       后端路由变更时只需改这里。
 // ─────────────────────────────────────────────────────────────
 export const auth = {
   register: (data) => api.post('/auth/register', data),
   login: (data) => api.post('/auth/login', data),
   me: () => api.get('/auth/me'),
+}
+
+export const stats = {
+  home: () => api.get('/stats'),
 }
 
 export const recipes = {
@@ -112,6 +117,7 @@ export const mealPlans = {
   create: (data) => api.post('/meal-plans', data),
   update: (id, data) => api.put(`/meal-plans/${id}`, data),
   remove: (id) => api.delete(`/meal-plans/${id}`),
+  shoppingList: (id) => api.get(`/meal-plans/${id}/shopping-list`),
 }
 
 export const cookingNotes = {
@@ -133,13 +139,37 @@ export const reviews = {
 
 export const users = {
   updateProfile: (data) => api.put('/users/profile', data),
+  changePassword: (data) => api.put('/users/password', data),
+  getPreferences: () => api.get('/users/preferences'),
+  updatePreferences: (data) => api.put('/users/preferences', data),
+  // 收藏：新增/取消（favoriteType: 'recipe' | 'meal_plan'）
   favorites: (params) => api.get('/users/favorites', { params }),
+  addFavorite: (favoriteType, favoriteId) =>
+    api.post('/users/favorites', null, {
+      params: { favorite_type: favoriteType, favorite_id: favoriteId },
+    }),
+  removeFavorite: (id) => api.delete(`/users/favorites/${id}`),
+  removeFavoriteByItem: (type, id) =>
+    api.delete(`/users/favorites/by/${type}/${id}`),
+  // 浏览历史：记录（params 传 { recipe_id } 或 { meal_plan_id }）与查询
+  recordHistory: (params) => api.post('/users/history', null, { params }),
   history: (params) => api.get('/users/history', { params }),
-  conversations: () => api.get('/users/conversations'),
+  // AI 对话历史
+  conversations: (params) => api.get('/users/conversations', { params }),
+  conversationDetail: (id) => api.get(`/users/conversations/${id}`),
+}
+
+// AI 模块 —— 对话管理（聊天 SSE 流式请求走 utils/sse.js 的 fetch，不经 axios）
+export const ai = {
+  rewindEdit: (convId, data) =>
+    api.post(`/ai/conversations/${convId}/rewind-edit`, data),
+  deleteConversation: (convId) => api.delete(`/ai/conversations/${convId}`),
 }
 
 export const recommendations = {
+  prompts: (params) => api.get('/recommendations/prompts', { params }),
   personalized: (params) => api.get('/recommendations/personalized', { params }),
+  mealPlans: (params) => api.get('/recommendations/meal-plans', { params }),
   query: (data) => api.post('/recommendations/query', data),
 }
 
@@ -150,6 +180,10 @@ export const admin = {
   updateTag: (id, params) => api.put(`/admin/tags/${id}`, null, { params }),
   removeTag: (id) => api.delete(`/admin/tags/${id}`),
   ingredients: (params) => api.get('/admin/ingredients', { params }),
+  createIngredient: (params) => api.post('/admin/ingredients', null, { params }),
+  updateIngredient: (id, params) =>
+    api.put(`/admin/ingredients/${id}`, null, { params }),
+  removeIngredient: (id) => api.delete(`/admin/ingredients/${id}`),
   pendingRecipes: (params) => api.get('/admin/recipes/pending', { params }),
   auditRecipe: (id, data) => api.post(`/admin/recipes/${id}/audit`, data),
   removeRecipe: (id) => api.delete(`/admin/recipes/${id}`),

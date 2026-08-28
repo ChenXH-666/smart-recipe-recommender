@@ -109,7 +109,7 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import api from '../../api'
+import { admin } from '../../api'
 
 const items = ref([])
 const total = ref(0)
@@ -128,7 +128,7 @@ async function load() {
     if (searchKeyword.value.trim()) {
       params.keyword = searchKeyword.value.trim()
     }
-    const res = await api.get('/admin/users', { params })
+    const res = await admin.users(params)
     items.value = res.items || []
     total.value = res.total || 0
   } finally {
@@ -144,7 +144,7 @@ function search() {
 
 async function toggle(row) {
   try {
-    await api.post(`/admin/users/${row.id}/toggle-active`)
+    await admin.toggleUserActive(row.id)
     ElMessage.closeAll()  // 清除残留 toast
     ElMessage.success(row.is_active ? '已禁用用户' : '已启用用户')
     load()
@@ -171,7 +171,7 @@ async function changeRole(row, newRole) {
     return  // 用户取消
   }
   try {
-    await api.post(`/admin/users/${row.id}/role`, null, { params: { role: newRole } })
+    await admin.updateUserRole(row.id, newRole)
     ElMessage.closeAll()  // 清除残留 toast 和 messagebox 遮罩
     ElMessage.success(`已${actionText}`)
     load()

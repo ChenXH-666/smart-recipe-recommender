@@ -124,7 +124,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useUserStore } from '../stores/user'
 import { Star, Edit, Delete, ShoppingCart, CopyDocument } from '@element-plus/icons-vue'
 import { ElMessageBox, ElMessage } from 'element-plus'
-import api from '../api'
+import { mealPlans, users } from '../api'
 
 const route = useRoute()
 const router = useRouter()
@@ -139,7 +139,7 @@ const shopping = ref(null)
 async function openShopping() {
   if (!plan.value) return
   try {
-    const res = await api.get(`/meal-plans/${plan.value.id}/shopping-list`)
+    const res = await mealPlans.shoppingList(plan.value.id)
     shopping.value = res
     shoppingVisible.value = true
   } catch (e) {
@@ -190,8 +190,8 @@ async function checkFavoriteStatus() {
   if (!userStore.isLoggedIn) return
   try {
     const planId = parseInt(route.params.id)
-    const res = await api.get('/users/favorites', {
-      params: { favorite_type: 'meal_plan', page: 1, page_size: 50 },
+    const res = await users.favorites({
+      favorite_type: 'meal_plan', page: 1, page_size: 50,
     })
     const items = res.items || []
     isFaved.value = items.some(it => it.data && it.data.id === planId)
@@ -204,7 +204,7 @@ async function toggleFavorite() {
   const planId = parseInt(route.params.id)
   if (isFaved.value) {
     try {
-      await api.delete('/users/favorites/by/meal_plan/' + planId)
+      await users.removeFavoriteByItem('meal_plan', planId)
       isFaved.value = false
       ElMessage.success('已取消收藏')
     } catch (e) {
@@ -212,7 +212,7 @@ async function toggleFavorite() {
     }
   } else {
     try {
-      await api.post('/users/favorites', null, { params: { favorite_type: 'meal_plan', favorite_id: planId } })
+      await users.addFavorite('meal_plan', planId)
       isFaved.value = true
       ElMessage.success('收藏成功')
     } catch (e) {
@@ -235,7 +235,7 @@ async function handleDelete() {
     return  // 用户点击取消
   }
   try {
-    await api.delete('/meal-plans/' + route.params.id)
+    await mealPlans.remove(route.params.id)
     ElMessage.closeAll()  // 清除残留的 ElMessageBox 遮罩和 toast
     ElMessage.success('删除成功')
     // 延迟跳转，确保 ElMessageBox 遮罩层已完全清理
@@ -249,11 +249,11 @@ async function handleDelete() {
 
 onMounted(async () => {
   try {
-    plan.value = await api.get(`/meal-plans/${route.params.id}`)
-    // 登录用户：检查收藏状态 + 记录浏览历史（静默调用，失败不影响页面）
+    plan.value = await mealPlans.detail(route.params.id)
+    // 登录用户：检查收藏状态（浏览历史已由后端 GET 详情接口自动记录，
+    // 前端不再手动 POST /users/history，避免与后端双写产生重复浏览记录）
     if (userStore.isLoggedIn) {
       checkFavoriteStatus()
-      api.post('/users/history', null, { params: { meal_plan_id: route.params.id } }).catch(() => {})
     }
   } catch (e) {
     // 404 或其他错误：保持 plan.value = null，触发 v-if="!loading && !plan" 兜底 UI

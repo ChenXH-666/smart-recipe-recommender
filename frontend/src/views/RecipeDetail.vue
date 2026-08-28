@@ -275,10 +275,12 @@
 /**
  * 菜谱详情页 - 数据加载流程
  * ===========================
- * 1. 组件挂载时，并行执行：
+ * 1. 组件挂载时：
  *    a. loadData()    → 调用 GET /recipes/:id 获取菜谱详情
+ *                       （后端在该接口内部自动记录浏览历史 + view_count+1）
  *    b. loadReviews() → 调用 GET /reviews/recipes/:id 获取用户点评
- *    c. 如果已登录，POST /users/history 记录浏览历史（静默调用，失败不影响页面）
+ *    c. 如果已登录，检查收藏状态
+ *       （不再手动 POST /users/history——后端详情接口已自动记录，双写会产生重复浏览）
  *
  * 2. 用户交互：
  *    - 收藏/取消收藏 → toggleFavorite()
@@ -291,7 +293,7 @@ import { ElMessage } from 'element-plus'
 import { useUserStore } from '../stores/user'
 import { useRecipeCartStore } from '../stores/recipeCart'
 import { User } from '@element-plus/icons-vue'
-import api from '../api'
+import { recipes, users, reviews as reviewsApi } from '../api'
 
 const route = useRoute()
 const cart = useRecipeCartStore()
@@ -333,7 +335,7 @@ function truncate(str, len) {
 
 async function loadData() {
   try {
-    const res = await api.get('/recipes/' + route.params.id)
+    const res = await recipes.detail(route.params.id)
     recipe.value = res
   } catch (e) {
     // 404 或其他错误：保持 recipe.value = null，触发 v-if="!loading && !recipe" 兜底 UI
@@ -347,7 +349,7 @@ async function loadData() {
 // 加载点评列表，加载失败不影响菜谱详情的展示
 async function loadReviews() {
   try {
-    const res = await api.get('/reviews/recipes/' + route.params.id)
+    const res = await reviewsApi.list(route.params.id)
     reviews.value = res.items || []
     reviewsTotal.value = res.total || 0
   } catch (e) {
@@ -361,9 +363,7 @@ async function checkFavoriteStatus() {
   try {
     const recipeId = parseInt(route.params.id)
     // 拉取用户收藏列表（菜谱类型），检查当前 recipe.id 是否在内
-    const res = await api.get('/users/favorites', {
-      params: { favorite_type: 'recipe', page: 1, page_size: 50 },
-    })
+    const res = await users.favorites({ favorite_type: 'recipe', page: 1, page_size: 50 })
     const items = res.items || []
     isFaved.value = items.some(it => it.data && it.data.id === recipeId)
   } catch (e) {
@@ -376,7 +376,7 @@ async function toggleFavorite() {
   const recipeId = parseInt(route.params.id)
   if (isFaved.value) {
     try {
-      await api.delete('/users/favorites/by/recipe/' + recipeId)
+      await users.removeFavoriteByItem('recipe', recipeId)
       isFaved.value = false
       ElMessage.success('已取消收藏')
     } catch (e) {
@@ -384,7 +384,7 @@ async function toggleFavorite() {
     }
   } else {
     try {
-      await api.post('/users/favorites', null, { params: { favorite_type: 'recipe', favorite_id: recipeId } })
+      await users.addFavorite('recipe', recipeId)
       isFaved.value = true
       ElMessage.success('收藏成功')
     } catch (e) {
@@ -399,7 +399,7 @@ async function submitReview() {
     return
   }
   try {
-    await api.post('/reviews/recipes/' + route.params.id, reviewForm)
+    await reviewsApi.create(route.params.id, reviewForm)
     reviewForm.rating = 0
     reviewForm.content = ''
     showReviewForm.value = false
@@ -413,13 +413,14 @@ async function submitReview() {
 onMounted(async () => {
   // 先加载菜谱详情：菜谱不存在（404/非法ID）时 recipe.value 保持 null
   await loadData()
-  // 菜谱不存在时无需加载点评/收藏/浏览历史，避免控制台报 404/422 错误
+  // 菜谱不存在时无需加载点评/收藏，避免控制台报 404/422 错误
   if (!recipe.value) return
   loadReviews()
-  // 登录用户：检查收藏状态 + 记录浏览历史（静默调用，失败不影响用户体验）
+  // 登录用户：检查收藏状态（浏览历史已由后端 GET 详情接口自动记录，
+  // 前端不再手动 POST /users/history——否则与后端自动记录双写并发，
+  // 在无唯一约束的库上会产生重复浏览记录，导致"看好几次"虚高）
   if (userStore.isLoggedIn) {
     checkFavoriteStatus()
-    api.post('/users/history', null, { params: { recipe_id: route.params.id } }).catch(() => {})
   }
 })
 </script>

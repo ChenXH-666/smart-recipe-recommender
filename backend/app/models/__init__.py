@@ -240,7 +240,16 @@ class UserFavorite(Base):
 
 
 class UserBrowseHistory(Base):
-    """浏览历史表 —— 记录用户浏览菜谱/套餐的时间线，用于个性化推荐"""
+    """浏览历史表 —— 记录用户浏览菜谱/套餐的时间线，用于个性化推荐
+
+    并发设计：单用户单对象只保留一条记录（"查→有则更新时间，无则插入"的
+    upsert 由业务层实现）。但纯应用层去重在并发下有竞态：同一用户双击
+    卡片产生的两个并发请求都查到"无记录"而各自插入，产生重复行。
+    因此数据库层加 (user_id, recipe_id)/(user_id, meal_plan_id) 两个唯一
+    索引兜底——MySQL/SQLite 的唯一索引中 NULL 不参与唯一性判断，天然适配
+    recipe_id/meal_plan_id 二选一可空的场景；并发插入冲突由业务层捕获
+    IntegrityError 后转为更新（见 utils/browse_history.py）。
+    """
     __tablename__ = "user_browse_history"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -253,6 +262,8 @@ class UserBrowseHistory(Base):
     recipe = relationship("Recipe")
 
     __table_args__ = (
+        UniqueConstraint("user_id", "recipe_id", name="uk_hist_user_recipe"),
+        UniqueConstraint("user_id", "meal_plan_id", name="uk_hist_user_plan"),
         Index("idx_user_id", "user_id"),
         Index("idx_viewed_at", "viewed_at"),
     )

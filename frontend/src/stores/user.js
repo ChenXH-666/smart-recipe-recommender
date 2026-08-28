@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import api from '../api'
+import { auth } from '../api'
 import axios from 'axios'
 
 function parseUserFromStorage() {
@@ -36,7 +36,7 @@ export const useUserStore = defineStore('user', () => {
   const isAdmin = computed(() => user.value?.role === 'admin')
 
   async function login(username, password) {
-    const res = await api.post('/auth/login', { username, password })
+    const res = await auth.login({ username, password })
     token.value = res.access_token
     user.value = res.user
     localStorage.setItem('token', res.access_token)
@@ -45,7 +45,7 @@ export const useUserStore = defineStore('user', () => {
   }
 
   async function register(data) {
-    return await api.post('/auth/register', data)
+    return await auth.register(data)
   }
 
   function logout() {

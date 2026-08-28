@@ -93,7 +93,7 @@
 import { ref, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { useUserStore } from '../stores/user'
-import api from '../api'
+import { recipes, recommendations } from '../api'
 import RecipeCard from '../components/RecipeCard.vue'
 
 const route = useRoute()
@@ -121,7 +121,7 @@ async function aiSearch() {
   if (!q || aiThinking.value) return
   aiThinking.value = true
   try {
-    const res = await api.post('/recommendations/query', { query: q })
+    const res = await recommendations.query({ query: q })
     // 只展示菜谱类型结果（套餐/组合不在此列表展示）
     const recipes = (res.items || []).filter((i) => i.type === 'recipe')
     items.value = recipes
@@ -158,7 +158,7 @@ async function loadData() {
       params.sort_by = sortField.value
       params.sort_order = sortOrder.value
     }
-    const res = await api.get('/recipes', { params })
+    const res = await recipes.list(params)
     items.value = res.items || []
     total.value = res.total || 0
   } finally {

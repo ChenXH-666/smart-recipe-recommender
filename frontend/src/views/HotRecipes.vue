@@ -16,7 +16,7 @@
 
 <script setup>
 import { ref, onMounted } from 'vue'
-import api from '../api'
+import { recipes } from '../api'
 import RecipeCard from '../components/RecipeCard.vue'
 
 const loading = ref(false)
@@ -25,7 +25,7 @@ const items = ref([])
 async function load() {
   loading.value = true
   try {
-    const res = await api.get('/recipes/hot', { params: { page_size: 24 } })
+    const res = await recipes.hot({ page_size: 24 })
     items.value = res.items || []
   } catch (e) {
     items.value = []

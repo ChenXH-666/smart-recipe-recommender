@@ -54,6 +54,7 @@ import os
 import re
 import json
 import logging
+import threading
 import requests
 from typing import List, Dict, Optional, Iterable
 
@@ -69,7 +70,13 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 # 全局 Chroma 向量存储实例（单例模式，避免重复初始化）
+# _vs_lock：初始化互斥锁。向量同步跑在 BackgroundTasks 线程池、对话 RAG
+# 检索跑在 asyncio.to_thread 线程池，多个线程可能同时首次触发
+# get_vectorstore() 的"检查-初始化"序列；无锁时竞态会各建一个 Chroma
+# 包装对象。锁开销为纳秒级（仅初始化路径竞争一次），检索热路径直接命中
+# 已初始化实例、不进锁。
 _vectorstore: Optional[Chroma] = None
+_vs_lock = threading.Lock()
 
 # 文本分割器 —— 在中文语义边界处进行切割
 _text_splitter = RecursiveCharacterTextSplitter(
@@ -182,32 +189,35 @@ def get_vectorstore() -> Chroma:
     """
     获取或初始化 Chroma 向量库。
     采用全局单例模式，整个应用生命周期内只初始化一次，
-    避免重复加载索引文件的开销。
+    避免重复加载索引文件的开销。初始化由 _vs_lock 互斥保护
+    （多线程首次并发触发的双重检查），已初始化后的读取不加锁。
 
     使用 chromadb.PersistentClient 直接管理持久化，绕过 LangChain
     对 persist_directory 的封装，避免部分版本组合下数据无法落盘的问题。
     """
     global _vectorstore
     if _vectorstore is None:
-        # CHROMA_PERSIST_DIR 现在是**绝对路径**（如 F:/chroma_db），
-        # 因为 ChromaDB 1.5.9 Rust 绑定不支持中文路径。
-        # 若是相对路径（兼容旧配置回退），则相对于 app 目录。
-        if os.path.isabs(settings.CHROMA_PERSIST_DIR):
-            persist_dir = settings.CHROMA_PERSIST_DIR
-        else:
-            persist_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), settings.CHROMA_PERSIST_DIR)
-        persist_dir = os.path.abspath(persist_dir)
-        os.makedirs(persist_dir, exist_ok=True)
-        logger.info(f"Chroma 持久化目录: {persist_dir}")
+        with _vs_lock:
+            if _vectorstore is None:
+                # CHROMA_PERSIST_DIR 现在是**绝对路径**（如 F:/chroma_db），
+                # 因为 ChromaDB 1.5.9 Rust 绑定不支持中文路径。
+                # 若是相对路径（兼容旧配置回退），则相对于 app 目录。
+                if os.path.isabs(settings.CHROMA_PERSIST_DIR):
+                    persist_dir = settings.CHROMA_PERSIST_DIR
+                else:
+                    persist_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), settings.CHROMA_PERSIST_DIR)
+                persist_dir = os.path.abspath(persist_dir)
+                os.makedirs(persist_dir, exist_ok=True)
+                logger.info(f"Chroma 持久化目录: {persist_dir}")
 
-        client = chromadb.PersistentClient(
-            path=persist_dir,
-            settings=ChromaSettings(anonymized_telemetry=False),
-        )
-        _vectorstore = Chroma(
-            client=client,
-            embedding_function=_get_embedding_model(),
-        )
+                client = chromadb.PersistentClient(
+                    path=persist_dir,
+                    settings=ChromaSettings(anonymized_telemetry=False),
+                )
+                _vectorstore = Chroma(
+                    client=client,
+                    embedding_function=_get_embedding_model(),
+                )
     return _vectorstore
 
 
@@ -277,6 +287,64 @@ def remove_from_chroma(source_type: str, source_id: int):
         logger.info(f"已从向量库移除 {source_type} {source_id} 的全部分块")
     except Exception as e:
         logger.error(f"从向量库移除 {source_type} {source_id} 失败: {e}")
+
+
+def sync_recipe_to_chroma_by_id(recipe_id: int):
+    """
+    后台同步入口：按 ID 加载菜谱并同步向量库（供 FastAPI BackgroundTasks 使用）。
+
+    为什么不直接把 ORM 对象丢给后台任务：请求结束后依赖注入的 session 已关闭，
+    对象处于 detached 状态，而向量同步需要读取 tags/ingredients/steps 关系属性，
+    未预加载的关系在 detached 状态下访问会抛 DetachedInstanceError。
+    本函数自建独立 session 并带预加载重新查询，任务完全自包含。
+
+    作为 BackgroundTasks 的同步函数由 Starlette 放入线程池执行，
+    Embedding API 耗时（1~3 秒）不再阻塞审核/创建接口的响应。
+    """
+    from app.models import Recipe, RecipeTag, RecipeIngredient
+    from sqlalchemy.orm import joinedload
+    from app.database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        recipe = (
+            db.query(Recipe)
+            .options(
+                joinedload(Recipe.tags).joinedload(RecipeTag.tag),
+                joinedload(Recipe.ingredients).joinedload(RecipeIngredient.ingredient),
+                joinedload(Recipe.steps),
+            )
+            .filter(Recipe.id == recipe_id, Recipe.is_deleted == 0)
+            .first()
+        )
+        if recipe:
+            sync_recipe_to_chroma(recipe)
+        else:
+            logger.warning(f"后台同步菜谱 {recipe_id} 到向量库：菜谱不存在或已删除，跳过")
+    except Exception as e:
+        logger.error(f"后台同步菜谱 {recipe_id} 到向量库失败: {e}")
+    finally:
+        db.close()
+
+
+def sync_cooking_note_to_chroma_by_id(note_id: int):
+    """后台同步入口：按 ID 加载心得并同步向量库（与菜谱后台同步同构）"""
+    from app.models import CookingNote
+    from app.database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        note = db.query(CookingNote).filter(
+            CookingNote.id == note_id, CookingNote.is_deleted == 0
+        ).first()
+        if note:
+            sync_cooking_note_to_chroma(note)
+        else:
+            logger.warning(f"后台同步心得 {note_id} 到向量库：心得不存在或已删除，跳过")
+    except Exception as e:
+        logger.error(f"后台同步心得 {note_id} 到向量库失败: {e}")
+    finally:
+        db.close()
 
 
 def sync_recipe_to_chroma(recipe):

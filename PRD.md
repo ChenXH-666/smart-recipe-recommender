@@ -229,7 +229,24 @@
 | 向量检索 Top-5 | ≤ 200ms | Chroma 本地查询 |
 | Rerank 精排（单轮对话，约 20~30 候选对） | ≤ 1s | SiliconFlow API 实测；超时（默认 10s）自动降级为召回排序 |
 | 并发支持 | ≥ 100 QPS | Uvicorn 多 worker 部署 |
-| 前端首屏加载 | ≤ 2s | Vite 构建 + 路由懒加载 |
+| 前端首屏加载 | ≤ 2s | Vite 构建 + 路由懒加载 + 依赖分包 |
+
+**已落地的性能优化措施**（与当前实现一致）：
+
+| 措施 | 说明 |
+|------|------|
+| AI 检索线程池化 | 对话 RAG 检索（Embedding/Rerank 同步 HTTP）经 `asyncio.to_thread` 执行，避免阻塞事件循环导致全站请求排队 |
+| 向量同步后台化 | 菜谱/心得创建、更新、审核时的向量同步走 `BackgroundTasks`，Embedding 耗时（1~3s）不再拖慢接口响应 |
+| 首页统计缓存 | `/api/stats` 7 次聚合 COUNT 加 60 秒 TTL 缓存 |
+| 详情接口 N+1 消除 | commit 后重新预加载标签/食材/步骤/作者，避免懒加载回潮 |
+| 会话列表摘要子查询 | `get_conversations` 按会话+角色聚合首末消息 ID，不再 joinedload 全量消息 |
+| LLM 客户端单例 | `_get_llm` 缓存 `ChatOpenAI`，复用 httpx 连接池 |
+| 对话记忆按需重载 | 仅内存缓存 miss 时才从 DB 重建历史 |
+| 前端并行请求 | 首页 5 路请求并行发起、各自渲染 |
+| AI 对话 Markdown 预计算 | 历史消息进列表时渲染一次，流式重渲染不再重复解析 |
+| 封面图懒加载 | 列表图片 `loading="lazy"`，视口内才请求 |
+| 静态资源长缓存 | 封面图响应 `Cache-Control: max-age=86400` |
+| 构建分包 | element-plus/图标/markdown 独立 chunk，业务主包 1244KB→87KB |
 
 ### 3.2 安全需求
 
@@ -251,7 +268,9 @@
 - **RAG 容错降级**：Embedding API 失败时返回零向量兜底；Chroma 检索失败时降级到 metadata 关键词评分排序
 - **Rerank 精排降级**：精排 API 失败/超时/未配置 Key 时返回空，候选池自动退回召回原序，主链路不受影响；可通过 `RERANK_ENABLED=false` 一键关闭
 - **AI 服务降级**：LLM 流式对话失败时不阻断候选菜谱展示，返回降级提示文案
-- **向量同步容错**：菜谱创建/更新时向量同步失败不影响主流程（try/except 兜底）
+- **向量同步容错**：菜谱创建/更新/审核时向量同步以 FastAPI BackgroundTasks 后台执行（不阻塞响应，Embedding 耗时 1~3 秒不拖慢接口）；后台任务自建会话按 ID 重新加载并同步，失败仅记日志不影响主流程，可用全量 rebuild 修复
+- **并发写兜底**：收藏、浏览历史等"先查后插"型写入在并发重复请求（如同一用户双击按钮）下由数据库唯一约束兜底，应用层捕获约束冲突后转为幂等响应（收藏返回 400"已收藏"、浏览记录转为更新时间），并发结果与串行一致，不产生重复数据或 500
+- **共享状态线程安全**：Chroma 向量库单例初始化加互斥锁（向量同步线程池与对话检索线程池可能同时首次触发）；对话记忆 LRU、限流器等内存状态均在单事件循环线程内操作，无交错竞态
 - **断点续传**：全量向量库重建支持 checkpoint，中断后可从断点继续，避免重复消耗 API 额度
 - **软删除策略**：菜谱、心得、评论均使用 `is_deleted` 软删除，保护数据完整性
 - **数据库事务**：多表写入使用 SQLAlchemy session 事务，失败自动回滚
@@ -270,6 +289,8 @@
 - 配置项集中管理于 `app/config.py`，通过 Pydantic Settings 从 `.env` 读取
 - 关键代码（如 RAG、AI 服务）配套"面向答辩"的设计说明注释
 - FastAPI 自动生成 OpenAPI 文档（`/docs`），便于前后端协作
+- 前端 API 路径统一封装为命名端点（`src/api/index.js`），views/stores 不直接写路径字面量，后端路由变更只改一处
+- 公共逻辑抽取为共享工具（如浏览历史 upsert 统一在 `utils/browse_history.py`，取消收藏共用 `_delete_favorite_and_sync_count`），避免多处实现漂移
 
 ### 3.6 兼容性需求
 
@@ -363,7 +384,7 @@
 | **用例 ID** | UC-03 |
 | **参与者** | 普通用户 |
 | **前置条件** | 用户已登录 |
-| **主流程** | 1. 用户点击"创建菜谱"<br>2. 填写标题、描述、封面、难度、烹饪时间、份量、预算<br>3. 选择/新建标签，添加食材与用量，添加烹饪步骤<br>4. 提交后调用 `POST /api/recipes`<br>5. 后端设置 `status=pending`，写入主表与关联表<br>6. 同步到 Chroma 向量库（失败不阻断）<br>7. 等待管理员审核通过后公开可见 |
+| **主流程** | 1. 用户点击"创建菜谱"<br>2. 填写标题、描述、封面、难度、烹饪时间、份量、预算<br>3. 选择/新建标签，添加食材与用量，添加烹饪步骤<br>4. 提交后调用 `POST /api/recipes`<br>5. 后端设置 `status=pending`，写入主表与关联表<br>6. 响应返回后由后台任务同步到 Chroma向量库（仅 approved 入库，失败仅记日志）<br>7. 等待管理员审核通过后公开可见 |
 | **后置条件** | 菜谱在"我的菜谱"中可见（pending 状态）；管理员审核通过后公众可见 |
 
 #### UC-04：管理员审核菜谱
@@ -431,12 +452,12 @@
 
 | 层级 | 目录 | 职责 |
 |------|------|------|
-| 入口层 | `app/main.py` | FastAPI 应用工厂、中间件注册、路由挂载、静态文件服务 |
-| 配置层 | `app/config.py` | Pydantic Settings 集中管理所有配置（DB/JWT/LLM/RAG） |
+| 入口层 | `app/main.py` | FastAPI 应用工厂、中间件注册、路由挂载、静态文件服务（封面图加长缓存头） |
+| 配置层 | `app/config.py` | Pydantic Settings 集中管理所有配置（DB/JWT/LLM/RAG，含独立 SQL_ECHO 开关） |
 | API 路由层 | `app/api/*.py` | RESTful 接口定义、参数校验、依赖注入 |
 | Schema 层 | `app/schemas/*.py` | Pydantic 数据验证模型（请求/响应体） |
 | 服务层 | `app/services/*.py` | 核心业务逻辑（AI 对话、RAG 检索、推荐引擎） |
-| 工具层 | `app/utils/*.py` | 营养估算（nutrition）、用量解析（portions）、忌口/过敏过滤（recipe_diet）等通用工具 |
+| 工具层 | `app/utils/*.py` | 营养估算（nutrition）、用量解析（portions）、忌口/过敏过滤（recipe_diet）、浏览历史 upsert（browse_history）等通用工具 |
 | 模型层 | `app/models/` | SQLAlchemy ORM 模型（16 张表） |
 | 基础设施层 | `app/core/` | JWT 处理、密码哈希、依赖注入工具 |
 | 数据库层 | `app/database.py` | 引擎与 Session 管理 |
@@ -509,7 +530,7 @@
 | chunk_overlap | 50 字符 |
 | 分隔符优先级 | `\n\n` > `\n` > `。` > `，` > `；` > 空格 |
 | Embedding 批次 | 64 条/批 |
-| 增量同步 | 菜谱/心得创建或更新时实时同步，"先删后插"保证幂等 |
+| 增量同步 | 菜谱/心得创建、更新或审核通过后经 BackgroundTasks 后台异步同步（不阻塞接口响应），"先删后插"保证幂等 |
 | 全量重建 | 支持 checkpoint 断点续传，每批次成功后立即写入 checkpoint |
 | 文档结构 | content=结构化文本，metadata={source_type, source_id, title, tags} |
 
@@ -669,6 +690,7 @@
 | recipes | status | ENUM('draft','pending','approved','rejected') DEFAULT 'pending' |
 | recipes | is_deleted | TINYINT DEFAULT 0（软删除标记） |
 | user_favorites | (user_id, favorite_type, favorite_id) | UNIQUE（防重复收藏） |
+| user_browse_history | (user_id, recipe_id) / (user_id, meal_plan_id) | UNIQUE ×2（防并发双插产生重复浏览记录；NULL 不参与唯一判断，兼容二选一可空列） |
 | meal_plan_items | (meal_plan_id, recipe_id) | UNIQUE（同一套餐不重复加菜） |
 | ai_messages | role | ENUM('user','assistant','system') |
 
@@ -682,6 +704,7 @@
 | recipes | idx_author_id | author_id | 作者菜谱查询 |
 | recipes | idx_created_at | created_at | 时间排序 |
 | recipes | idx_estimated_cost | estimated_cost | 预算筛选 |
+| user_browse_history | uk_hist_user_recipe / uk_hist_user_plan | (user_id, recipe_id) / (user_id, meal_plan_id) | 防并发重复（部分唯一索引，兼作按用户查询） |
 | user_browse_history | idx_user_id, idx_viewed_at | user_id, viewed_at | 历史查询与热门统计 |
 | ai_messages | idx_conversation_id | conversation_id | 会话消息查询 |
 
@@ -814,6 +837,7 @@
 | DB_HOST | localhost | MySQL 主机 |
 | DB_PORT | 3308 | MySQL 端口 |
 | DB_NAME | recipe_system | 数据库名 |
+| SQL_ECHO | false | SQL 日志开关（与 DEBUG 解耦，排查 SQL 时临时开启） |
 | JWT_SECRET_KEY | （占位） | 生产环境必须替换 |
 | JWT_ACCESS_TOKEN_EXPIRE_MINUTES | 1440 | 24 小时 |
 | CHROMA_PERSIST_DIR | F:/chroma_db | 向量库持久化目录（纯ASCII路径，避免Windows中文路径问题） |

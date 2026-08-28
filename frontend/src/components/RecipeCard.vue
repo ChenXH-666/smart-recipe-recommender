@@ -1,8 +1,14 @@
 <template>
   <div class="recipe-card" @click="$router.push('/recipes/' + recipe.id)">
     <div class="card-image">
-      <img v-if="displayImageUrl" :src="displayImageUrl" :alt="recipe.title" />
-      <div v-else class="image-placeholder">
+      <img
+        v-if="displayImageUrl && !imgFailed"
+        :src="displayImageUrl"
+        :alt="recipe.title"
+        loading="lazy"
+        @error="onImgError"
+      />
+      <div v-if="!displayImageUrl || imgFailed" class="image-placeholder">
         <el-icon :size="48"><Picture /></el-icon>
       </div>
       <div v-if="recipe.difficulty" class="difficulty-tag" :class="'diff-' + recipe.difficulty">
@@ -56,7 +62,7 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { ref, computed } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useRecipeCartStore } from '../stores/recipeCart'
 import { useTodoListStore } from '../stores/todoList'
@@ -71,6 +77,9 @@ import { useTodoListStore } from '../stores/todoList'
  * - 难度标签用 CSS 类名控制颜色（diff-easy/diff-medium/diff-hard），而非动态 style
  * - 标签最多显示 3 个，避免卡片信息过载
  * - 点击卡片整跳转到菜谱详情页（而非内部嵌套 router-link，减少 DOM 层级）
+ * - 封面图 loading="lazy"：列表/横向滑动区只加载视口内的图片，
+ *   首页几十张外链封面不再一次性全部请求
+ * - 封面图加载失败（外链图挂掉/防盗链）回退本地默认封面，避免裂图
  */
 const props = defineProps({
   recipe: { type: Object, required: true },
@@ -84,6 +93,13 @@ const { items: todoItems } = storeToRefs(todo)
 
 const difficultyMap = { easy: '简单', medium: '中等', hard: '困难' }
 
+// 外链封面加载失败标记（配合模板展示占位图）
+const imgFailed = ref(false)
+
+function onImgError() {
+  imgFailed.value = true
+}
+
 // 统一标签格式：后端可能返回对象数组或字符串数组，前端都兼容
 const displayTags = computed(() => {
   const tags = props.recipe.tags || []
@@ -95,13 +111,8 @@ const displayTags = computed(() => {
   })
 })
 
-// 统一图片地址：相对路径自动补全为绝对路径
-const displayImageUrl = computed(() => {
-  const url = props.recipe.cover_image_url
-  if (!url) return ''
-  if (url.startsWith('http')) return url
-  return url
-})
+// 统一图片地址（相对路径 /static/... 与绝对 https 外链均可直接作为 src）
+const displayImageUrl = computed(() => props.recipe.cover_image_url || '')
 </script>
 
 <style scoped>

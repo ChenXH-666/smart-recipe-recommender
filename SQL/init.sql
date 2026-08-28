@@ -144,12 +144,18 @@ CREATE TABLE user_favorites (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- 3.9 浏览历史表
+-- 唯一约束说明：单用户单对象只保留一条浏览记录（应用层 upsert 去重）。
+-- 两个部分唯一索引兜底并发竞态（同一用户双击卡片导致并发插入重复行）：
+-- MySQL 唯一索引中 NULL 不参与唯一性判断，recipe_id/meal_plan_id 二选一
+-- 可空列天然适配——浏览套餐的行 recipe_id 为 NULL，不参与第一个索引。
 CREATE TABLE user_browse_history (
     id INT AUTO_INCREMENT PRIMARY KEY,
     user_id INT NOT NULL,
     recipe_id INT,
     meal_plan_id INT,
     viewed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_hist_user_recipe (user_id, recipe_id),
+    UNIQUE KEY uk_hist_user_plan (user_id, meal_plan_id),
     KEY idx_user_id (user_id),
     KEY idx_viewed_at (viewed_at),
     CONSTRAINT fk_history_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,

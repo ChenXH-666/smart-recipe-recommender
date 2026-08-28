@@ -91,7 +91,7 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import api from '../../api'
+import { admin } from '../../api'
 
 const tags = ref([])
 const loading = ref(false)
@@ -119,8 +119,8 @@ const editForm = ref({ id: null, name: '', type: '' })
 async function load() {
   loading.value = true
   try {
-    const res = await api.get('/admin/tags', {
-      params: { page: page.value, page_size: pageSize },
+    const res = await admin.tags({
+      page: page.value, page_size: pageSize,
     })
     // 后端返回 { total, page, page_size, items }，需取 items 字段
     tags.value = Array.isArray(res) ? res : (res.items || [])
@@ -138,7 +138,7 @@ async function addTag() {
     return
   }
   try {
-    await api.post('/admin/tags', null, { params: { name: newName.value.trim(), type: newType.value.trim() || undefined } })
+    await admin.createTag({ name: newName.value.trim(), type: newType.value.trim() || undefined })
     ElMessage.closeAll()  // 清除残留 toast，避免与新增成功消息混淆
     ElMessage.success('添加成功')
     newName.value = ''
@@ -161,11 +161,9 @@ async function saveEdit() {
   }
   try {
     // 后端 update_tag 接口使用 Query 参数（name/type/description），需通过 params 传递
-    await api.put(`/admin/tags/${editForm.value.id}`, null, {
-      params: {
-        name: editForm.value.name.trim(),
-        type: editForm.value.type.trim() || undefined,
-      },
+    await admin.updateTag(editForm.value.id, {
+      name: editForm.value.name.trim(),
+      type: editForm.value.type.trim() || undefined,
     })
     ElMessage.closeAll()  // 清除残留的"添加成功"toast，避免误显示新增消息
     ElMessage.success('修改成功')
@@ -183,7 +181,7 @@ async function delTag(row) {
     return  // 用户取消
   }
   try {
-    await api.delete(`/admin/tags/${row.id}`)
+    await admin.removeTag(row.id)
     ElMessage.closeAll()  // 清除残留的 ElMessageBox 遮罩和 toast
     ElMessage.success('删除成功')
     // 若当前页删除后为空且非第一页，回退一页

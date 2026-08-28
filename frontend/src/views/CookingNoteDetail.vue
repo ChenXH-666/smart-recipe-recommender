@@ -168,7 +168,7 @@ import { useUserStore } from '../stores/user'
 import { User, Edit, Delete } from '@element-plus/icons-vue'
 import { ElMessageBox, ElMessage } from 'element-plus'
 import { renderMarkdown } from '../utils/markdown'
-import api from '../api'
+import { cookingNotes, recipes } from '../api'
 
 const route = useRoute()
 const router = useRouter()
@@ -206,7 +206,7 @@ function formatDate(d) {
 
 async function loadNote() {
   try {
-    note.value = await api.get('/cooking-notes/' + noteId)
+    note.value = await cookingNotes.detail(noteId)
   } catch (e) {
     note.value = null
   }
@@ -214,8 +214,8 @@ async function loadNote() {
 
 async function loadComments() {
   try {
-    const res = await api.get('/cooking-notes/' + noteId + '/comments', {
-      params: { page: page.value, page_size: pageSize },
+    const res = await cookingNotes.comments(noteId, {
+      page: page.value, page_size: pageSize,
     })
     comments.value = res.items || []
     total.value = res.total || 0
@@ -233,7 +233,7 @@ async function submitComment() {
   }
   submitting.value = true
   try {
-    await api.post('/cooking-notes/' + noteId + '/comments', { content })
+    await cookingNotes.createComment(noteId, { content })
     commentForm.content = ''
     page.value = 1
     await loadComments()
@@ -245,7 +245,7 @@ async function submitComment() {
 
 async function deleteComment(commentId) {
   try {
-    await api.delete('/cooking-notes/comments/' + commentId)
+    await cookingNotes.removeComment(commentId)
     await loadComments()
     if (note.value) note.value.comment_count = Math.max(0, note.value.comment_count - 1)
   } catch (e) {
@@ -271,7 +271,7 @@ async function submitEdit() {
   }
   submitting.value = true
   try {
-    await api.put('/cooking-notes/' + noteId, editForm)
+    await cookingNotes.update(noteId, editForm)
     // 先关闭对话框（配合 append-to-body 隔离组件内重新渲染），再显示 toast 和刷新数据
     showEditDialog.value = false
     ElMessage.closeAll()  // 清除残留 toast
@@ -301,7 +301,7 @@ async function handleDelete() {
     return  // 用户点击取消，不进行删除
   }
   try {
-    await api.delete('/cooking-notes/' + noteId)
+    await cookingNotes.remove(noteId)
     ElMessage.closeAll()  // 清除残留的 ElMessageBox 遮罩和 toast
     ElMessage.success('删除成功')
     // 延迟跳转，确保 ElMessageBox 的遮罩层已完全清理
@@ -316,7 +316,7 @@ async function handleDelete() {
 // 加载菜谱选项（供编辑时选择关联菜谱）
 async function loadRecipes() {
   try {
-    const res = await api.get('/recipes', { params: { page_size: 50 } })
+    const res = await recipes.list({ page_size: 50 })
     recipeOptions.value = res.items || []
   } catch (e) { console.error(e) }
 }

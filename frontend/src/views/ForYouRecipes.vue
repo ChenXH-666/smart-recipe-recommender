@@ -16,7 +16,7 @@
 
 <script setup>
 import { ref, onMounted } from 'vue'
-import api from '../api'
+import { recommendations } from '../api'
 import RecipeCard from '../components/RecipeCard.vue'
 
 const loading = ref(false)
@@ -25,7 +25,7 @@ const items = ref([])
 async function load() {
   loading.value = true
   try {
-    const res = await api.get('/recommendations/personalized', { params: { limit: 20 } })
+    const res = await recommendations.personalized({ limit: 20 })
     items.value = res.items || []
   } catch (e) {
     items.value = []

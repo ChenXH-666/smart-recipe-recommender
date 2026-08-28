@@ -46,6 +46,11 @@ class Settings(BaseSettings):
     APP_VERSION: str = "1.0.0"
     DEBUG: bool = True
 
+    # SQL 日志开关 —— 与 DEBUG 解耦，默认关闭。
+    # echo 会把每条 SQL 打印到控制台，演示/压测时明显拖慢且日志爆炸；
+    # 需要排查 SQL 时在 .env 设 SQL_ECHO=true 临时开启
+    SQL_ECHO: bool = False
+
     # 数据库 - MySQL
     DB_HOST: str = "localhost"
     DB_PORT: int = 3308

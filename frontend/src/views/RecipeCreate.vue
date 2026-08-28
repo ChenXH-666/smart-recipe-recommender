@@ -225,7 +225,7 @@
 import { ref, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import api from '../api'
+import { recipes, admin } from '../api'
 
 const router = useRouter()
 
@@ -282,8 +282,8 @@ function removeStep(index) {
 async function loadOptions() {
   try {
     const [tagsRes, ingredientsRes] = await Promise.all([
-      api.get('/admin/tags', { params: { page_size: 500 } }),
-      api.get('/admin/ingredients', { params: { page_size: 500 } }),
+      admin.tags({ page_size: 500 }),
+      admin.ingredients({ page_size: 500 }),
     ])
     tagOptions.value = tagsRes.items || []
     ingredientOptions.value = ingredientsRes.items || []
@@ -343,7 +343,7 @@ async function handleSubmit(asDraft = false) {
           duration: step.duration,
         })),
     }
-    const res = await api.post('/recipes', payload)
+    const res = await recipes.create(payload)
     router.push(`/recipes/${res.id}`)
   } catch (e) {
     console.error(e)

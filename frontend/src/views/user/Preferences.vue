@@ -49,7 +49,7 @@
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import api from '../../api'
+import { users } from '../../api'
 
 const router = useRouter()
 
@@ -76,7 +76,7 @@ const saving = ref(false)
 
 async function load() {
   try {
-    const res = await api.get('/users/preferences')
+    const res = await users.getPreferences()
     form.value = {
       cuisines: res.cuisines || [],
       diet_tags: res.diet_tags || [],
@@ -97,7 +97,7 @@ async function save() {
     if (i >= 0) diet_tags.splice(i, 1)
   }
   try {
-    await api.put('/users/preferences', {
+    await users.updatePreferences({
       cuisines: form.value.cuisines,
       diet_tags,
       free_text: form.value.free_text,

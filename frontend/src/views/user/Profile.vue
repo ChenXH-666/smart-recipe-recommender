@@ -98,7 +98,7 @@
 import { reactive, ref } from 'vue'
 import { useUserStore } from '../../stores/user'
 import { User } from '@element-plus/icons-vue'
-import api from '../../api'
+import { users } from '../../api'
 import { ElMessage } from 'element-plus'
 
 const userStore = useUserStore()
@@ -165,7 +165,7 @@ async function updateProfile() {
   }
   updating.value = true
   try {
-    const res = await api.put('/users/profile', {
+    const res = await users.updateProfile({
       nickname: profileForm.nickname,
       email: profileForm.email,
       avatar_url: profileForm.avatar_url,
@@ -190,7 +190,7 @@ async function changePwd() {
   if (!valid) return
   pwdUpdating.value = true
   try {
-    await api.put('/users/password', pwdForm)
+    await users.changePassword(pwdForm)
     ElMessage.closeAll()
     ElMessage.success('密码修改成功')
     pwdRef.value?.resetFields()

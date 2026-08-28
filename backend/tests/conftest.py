@@ -85,6 +85,17 @@ def _clear_rate_limiter():
     rate_limit._limiter._store.clear()
 
 
+@pytest.fixture(autouse=True)
+def _clear_stats_cache():
+    """首页统计 TTL 缓存为全局状态；逐用例清理，保证各用例独立数据库的统计断言正确。"""
+    from app.api import stats as _stats_api
+    _stats_api._stats_cache["data"] = None
+    _stats_api._stats_cache["expires_at"] = 0.0
+    yield
+    _stats_api._stats_cache["data"] = None
+    _stats_api._stats_cache["expires_at"] = 0.0
+
+
 @pytest.fixture()
 def client(db_engine, monkeypatch):
     """FastAPI TestClient —— 覆盖 get_db 依赖注入 SQLite 会话，并 stub Chroma 同步。"""
@@ -107,12 +118,12 @@ def client(db_engine, monkeypatch):
             db.close()
 
     app.dependency_overrides[get_db] = override_get_db
-    # 屏蔽真实向量库同步，避免测试触碰 Chroma
-    monkeypatch.setattr(_recipes_api, "sync_recipe_to_chroma", lambda recipe: None)
+    # 屏蔽真实向量库同步（后台任务），避免测试触碰 Chroma / 生产 MySQL
+    monkeypatch.setattr(_recipes_api, "sync_recipe_to_chroma_by_id", lambda rid: None)
     monkeypatch.setattr(_recipes_api, "remove_from_chroma", lambda *a, **k: None)
-    monkeypatch.setattr(_notes_api, "sync_cooking_note_to_chroma", lambda note: None)
+    monkeypatch.setattr(_notes_api, "sync_cooking_note_to_chroma_by_id", lambda nid: None)
     monkeypatch.setattr(_notes_api, "remove_from_chroma", lambda *a, **k: None)
-    monkeypatch.setattr(_admin_api, "sync_recipe_to_chroma", lambda recipe: None)
+    monkeypatch.setattr(_admin_api, "sync_recipe_to_chroma_by_id", lambda rid: None)
     monkeypatch.setattr(_admin_api, "remove_from_chroma", lambda *a, **k: None)
 
     with TestClient(app) as c:

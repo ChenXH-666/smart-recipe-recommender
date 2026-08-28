@@ -70,7 +70,7 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { useUserStore } from '../stores/user'
-import api from '../api'
+import { mealPlans } from '../api'
 
 const userStore = useUserStore()
 
@@ -83,7 +83,7 @@ const loading = ref(false)
 async function load() {
   loading.value = true
   try {
-    const res = await api.get('/meal-plans', { params: { page: page.value, page_size: pageSize } })
+    const res = await mealPlans.list({ page: page.value, page_size: pageSize })
     items.value = res.items || []
     total.value = res.total || 0
   } catch (e) {

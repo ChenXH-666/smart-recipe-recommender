@@ -145,7 +145,7 @@
 import { ref, reactive, computed, watch, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import api from '../api'
+import { recipes, mealPlans, users } from '../api'
 import { useRecipeCartStore } from '../stores/recipeCart'
 
 const router = useRouter()
@@ -229,7 +229,7 @@ async function remoteSearchRecipe(query) {
       return
     }
     // 后端用 title/描述 模糊匹配，这里只保留"名称包含关键词"的，避免混入描述命中项
-    const res = await api.get('/recipes', { params: { keyword: kw, page_size: 50 } })
+    const res = await recipes.list({ keyword: kw, page_size: 50 })
     const kwl = kw.toLowerCase()
     searchKeyword.value = kw
     searchResults.value = (res.items || []).filter((r) => String(r.title).toLowerCase().includes(kwl))
@@ -260,7 +260,7 @@ const favLoading = ref(false)
 async function addFromFavorites() {
   favLoading.value = true
   try {
-    const res = await api.get('/users/favorites', { params: { favorite_type: 'recipe', page_size: 50 } })
+    const res = await users.favorites({ favorite_type: 'recipe', page_size: 50 })
     const favs = res.items || []
     let added = 0
     for (const f of favs) {
@@ -282,7 +282,7 @@ async function addFromFavorites() {
 
 async function loadRecipes() {
   try {
-    const res = await api.get('/recipes', { params: { page_size: 50 } })
+    const res = await recipes.list({ page_size: 50 })
     recipeOptions.value = res.items || res
   } catch (e) {
     console.error(e)
@@ -295,7 +295,7 @@ async function loadRecipes() {
 async function loadMealPlan() {
   if (!editId.value) return
   try {
-    const plan = await api.get(`/meal-plans/${editId.value}`)
+    const plan = await mealPlans.detail(editId.value)
     form.title = plan.title || ''
     form.description = plan.description || ''
     form.cover_image_url = plan.cover_image_url || ''
@@ -344,11 +344,11 @@ async function handleSubmit(asDraft = false) {
     }
     if (isEdit.value) {
       // 编辑模式：PUT 更新
-      await api.put(`/meal-plans/${editId.value}`, payload)
+      await mealPlans.update(editId.value, payload)
       router.push(`/meal-plans/${editId.value}`)
     } else {
       // 创建模式：POST 新建
-      const res = await api.post('/meal-plans', payload)
+      const res = await mealPlans.create(payload)
       // 仅当真正创建成功且是从合集跳转而来时才清空合集（复制他人套餐不清）
       if (fromCart.value) cart.clear()
       router.push(`/meal-plans/${res.id}`)
@@ -367,7 +367,7 @@ async function ensureRecipeOptions(ids) {
   if (!missing.length) return
   const fetched = await Promise.all(
     missing.map((id) =>
-      api.get(`/recipes/${id}`)
+      recipes.detail(id)
         .then((r) => ({ id: r.id, title: r.title }))
         .catch(() => null)
     )

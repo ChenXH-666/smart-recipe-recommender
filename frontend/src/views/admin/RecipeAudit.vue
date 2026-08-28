@@ -141,7 +141,7 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { ElMessageBox, ElMessage } from 'element-plus'
-import api from '../../api'
+import { admin } from '../../api'
 
 const status = ref('pending')
 const items = ref([])
@@ -171,7 +171,7 @@ async function load() {
     if (keyword.value.trim()) {
       params.keyword = keyword.value.trim()
     }
-    const res = await api.get('/admin/recipes/pending', { params })
+    const res = await admin.pendingRecipes(params)
     items.value = res.items || []
     total.value = res.total || 0
   } finally {
@@ -207,7 +207,7 @@ async function confirmAudit() {
   }
   auditLoading.value = true
   try {
-    await api.post(`/admin/recipes/${auditId.value}/audit`, {
+    await admin.auditRecipe(auditId.value, {
       action: auditAction.value,
       comment: auditComment.value.trim(),
     })
@@ -232,7 +232,7 @@ async function del(id) {
     return  // 用户取消
   }
   try {
-    await api.delete(`/admin/recipes/${id}`)
+    await admin.removeRecipe(id)
     ElMessage.closeAll()  // 清除残留的 ElMessageBox 遮罩和 toast
     ElMessage.success('删除成功')
     // 若当前页删除后为空且非第一页，回退一页

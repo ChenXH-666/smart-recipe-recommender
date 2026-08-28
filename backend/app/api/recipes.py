@@ -8,7 +8,7 @@
   - 浏览历史自动记录（仅登录用户），单用户单菜谱最近一次浏览时间，避免表膨胀
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import and_, or_, func, desc, asc, update, case
 from datetime import datetime, timedelta
@@ -24,8 +24,9 @@ from app.schemas.recipe import (
 )
 from app.schemas.common import PaginatedResponse, SuccessResponse
 from app.core.deps import get_current_user, get_optional_user
-from app.services.rag_service import sync_recipe_to_chroma, remove_from_chroma
+from app.services.rag_service import sync_recipe_to_chroma_by_id, remove_from_chroma
 from app.utils.validation import sanitize_recipe_cover, parse_int_list
+from app.utils.browse_history import upsert_browse_history
 
 router = APIRouter()
 
@@ -125,26 +126,13 @@ def _validate_cover_image_url(url):
 
 def _record_browse_history(db: Session, user_id: int | None, recipe_id: int):
     """
-    自动记录浏览历史（FR-R02 要求）。
+    自动记录浏览历史（FR-R02 要求）—— 委托公共 upsert 实现。
 
     策略：
       - 登录用户：记录浏览历史；同一用户对同一菜谱只保留最近一条记录（去重）
       - 未登录用户：不记录
-    避免表膨胀：单用户单菜谱反复浏览只更新时间，不新增行
     """
-    if user_id is None:
-        return
-    now = datetime.now()
-    existing = db.query(UserBrowseHistory).filter(
-        UserBrowseHistory.user_id == user_id,
-        UserBrowseHistory.recipe_id == recipe_id,
-    ).first()
-    if existing:
-        existing.viewed_at = now
-    else:
-        db.add(UserBrowseHistory(
-            user_id=user_id, recipe_id=recipe_id, viewed_at=now
-        ))
+    upsert_browse_history(db, user_id, recipe_id=recipe_id)
 
 
 @router.get("", response_model=PaginatedResponse[RecipeListItem])
@@ -356,7 +344,22 @@ def get_recipe(
     # 记录浏览历史（登录用户）
     _record_browse_history(db, current_user.id if current_user else None, recipe_id)
     db.commit()
-    db.refresh(recipe)
+
+    # commit（expire_on_commit）会使开头 joinedload 预加载的关系全部过期，
+    # 若直接序列化，_enrich 时 tags/ingredients/steps 会退化为逐集合懒加载（N+1）。
+    # 这里重新执行一次预加载查询（同一会话内对象身份复用，关系一次性加载回来），
+    # 并补上 author 预加载 —— 详情页需要作者头像，原查询遗漏会多一次懒加载。
+    recipe = (
+        db.query(Recipe)
+        .options(
+            joinedload(Recipe.author),
+            joinedload(Recipe.tags).joinedload(RecipeTag.tag),
+            joinedload(Recipe.ingredients).joinedload(RecipeIngredient.ingredient),
+            joinedload(Recipe.steps),
+        )
+        .filter(Recipe.id == recipe_id, Recipe.is_deleted == 0)
+        .first()
+    )
 
     from app.utils.recipe_diet import get_restriction_set
     return _enrich_recipe_detail(recipe, get_restriction_set(current_user))
@@ -365,6 +368,7 @@ def get_recipe(
 @router.post("", response_model=RecipeDetail, status_code=201)
 def create_recipe(
     data: RecipeCreate,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
@@ -446,14 +450,11 @@ def create_recipe(
     db.commit()
     db.refresh(recipe)
 
-    # 同步到向量库（失败不影响主流程）
+    # 同步到向量库（后台执行，失败仅记日志不影响主流程）
     # 仅 approved 状态入向量库：普通用户创建的 pending 菜谱须过审后（审核路由）再同步，
     # 避免未过审内容被 RAG 检索到
     if recipe.status == "approved":
-        try:
-            sync_recipe_to_chroma(recipe)
-        except Exception:
-            pass
+        background_tasks.add_task(sync_recipe_to_chroma_by_id, recipe.id)
 
     return _enrich_recipe_detail(recipe)
 
@@ -462,6 +463,7 @@ def create_recipe(
 def update_recipe(
     recipe_id: int,
     data: RecipeUpdate,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
@@ -537,13 +539,10 @@ def update_recipe(
     db.commit()
     db.refresh(recipe)
 
-    # 同步到向量库：仅 approved 菜谱参与 RAG；pending/rejected 编辑后不同步，
+    # 同步到向量库（后台执行）：仅 approved 菜谱参与 RAG；pending/rejected 编辑后不同步，
     # 待审核通过时由审核路由统一同步
     if recipe.status == "approved":
-        try:
-            sync_recipe_to_chroma(recipe)
-        except Exception:
-            pass
+        background_tasks.add_task(sync_recipe_to_chroma_by_id, recipe.id)
 
     return _enrich_recipe_detail(recipe)
 
@@ -551,6 +550,7 @@ def update_recipe(
 @router.delete("/{recipe_id}", response_model=SuccessResponse)
 def delete_recipe(
     recipe_id: int,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
@@ -570,7 +570,7 @@ def delete_recipe(
     recipe.is_deleted = 1
     db.commit()
 
-    # 从向量库移除（失败不影响删除主流程，可通过 rebuild 修复）
-    remove_from_chroma("recipe", recipe.id)
+    # 从向量库移除（后台执行，失败不影响删除主流程，可通过 rebuild 修复）
+    background_tasks.add_task(remove_from_chroma, "recipe", recipe.id)
 
     return SuccessResponse(message="删除成功")

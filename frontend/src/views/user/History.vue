@@ -64,13 +64,13 @@
  * 浏览历史页面
  * =============
  * 功能：展示用户最近浏览过的菜谱记录，按时间倒序排列。
- * 浏览记录在 RecipeDetail.vue 中自动记录（onMounted → POST /users/history）。
+ * 浏览记录由后端 GET 详情接口自动写入（访问菜谱/套餐详情时），前端不再手动记录。
  *
  * 注意：清空历史功能因后端 DELETE /users/history 接口未实现，已暂时隐藏按钮。
  */
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import api from '../../api'
+import { users } from '../../api'
 
 const router = useRouter()
 const items = ref([])
@@ -88,7 +88,7 @@ function formatDate(d) {
 async function load() {
   loading.value = true
   try {
-    const res = await api.get('/users/history', { params: { page: page.value, page_size: pageSize } })
+    const res = await users.history({ page: page.value, page_size: pageSize })
     items.value = res.items || []
     total.value = res.total || 0
   } catch (e) {

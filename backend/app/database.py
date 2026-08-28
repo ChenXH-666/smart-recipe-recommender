@@ -34,7 +34,7 @@ engine = create_engine(
     pool_size=20,
     max_overflow=40,
     pool_pre_ping=True,  # 每次使用前 ping 连接，防止使用已断开的连接
-    echo=settings.DEBUG,
+    echo=settings.SQL_ECHO,  # SQL 日志独立开关（默认关闭，与 DEBUG 解耦）
 )
 
 # SessionLocal 是线程局部的会话工厂，每次调用产生一个新的数据库会话

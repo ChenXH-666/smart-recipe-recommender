@@ -178,7 +178,7 @@
 import { ref, reactive, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import api from '../api'
+import { recipes, admin } from '../api'
 import { useUserStore } from '../stores/user'
 
 const route = useRoute()
@@ -208,8 +208,8 @@ const form = reactive({
 // 这里取 .items 数组并请求较大 page_size（最大 500）一次性获取全部选项
 async function loadMeta() {
   const [tagsRes, ingsRes] = await Promise.all([
-    api.get('/admin/tags', { params: { page_size: 500 } }),
-    api.get('/admin/ingredients', { params: { page_size: 500 } }),
+    admin.tags({ page_size: 500 }),
+    admin.ingredients({ page_size: 500 }),
   ])
   allTags.value = tagsRes.items || []
   allIngredients.value = ingsRes.items || []
@@ -218,7 +218,7 @@ async function loadMeta() {
 // 加载已有菜谱数据并填充到表单
 async function loadRecipe() {
   try {
-    const recipe = await api.get(`/recipes/${route.params.id}`)
+    const recipe = await recipes.detail(route.params.id)
     // 权限校验：仅作者本人可进入编辑页；非作者重定向到详情页
     // 后端虽然也会在 PUT 时拦截，但提前校验避免用户填写后才发现无权限
     if (userStore.user?.id !== recipe.author_id) {
@@ -326,7 +326,7 @@ async function handleSubmit(asDraft = false) {
       ingredients: validIngredients,
       steps,
     }
-    await api.put(`/recipes/${route.params.id}`, payload)
+    await recipes.update(route.params.id, payload)
     router.push(`/recipes/${route.params.id}`)
   } finally {
     submitting.value = false

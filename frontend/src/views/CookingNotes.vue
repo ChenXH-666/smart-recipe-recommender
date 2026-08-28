@@ -142,7 +142,7 @@ import { useRoute } from 'vue-router'
 import { useUserStore } from '../stores/user'
 import { User } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
-import api from '../api'
+import { cookingNotes, recipes } from '../api'
 
 const userStore = useUserStore()
 const route = useRoute()
@@ -223,7 +223,7 @@ async function load() {
     const params = { page: page.value, page_size: pageSize }
     if (filterMine.value) params.mine = 1
     if (filterRecipeId.value) params.recipe_id = filterRecipeId.value
-    const res = await api.get('/cooking-notes', { params })
+    const res = await cookingNotes.list(params)
     items.value = res.items || []
     total.value = res.total || 0
   } catch (e) {
@@ -248,12 +248,12 @@ watch([filterMine, filterRecipeId], () => {
 // 错误静默处理：加载失败不影响心得列表的展示
 async function loadRecipes() {
   try {
-    const res = await api.get('/recipes', { params: { page_size: 50 } })
+    const res = await recipes.list({ page_size: 50 })
     recipeOptions.value = res.items || []
     // 若从菜谱详情"相关心得"跳转而来（?recipe_id=xx），且该菜谱不在下拉里，按 id 补齐标题
     if (filterRecipeId.value && !recipeOptions.value.some((r) => r.id === filterRecipeId.value)) {
       try {
-        const r = await api.get(`/recipes/${filterRecipeId.value}`)
+        const r = await recipes.detail(filterRecipeId.value)
         recipeOptions.value.push({ id: r.id, title: r.title })
       } catch (e) { /* 忽略 */ }
     }
@@ -273,7 +273,7 @@ async function submitNote() {
   if (!valid) return
   submitting.value = true
   try {
-    await api.post('/cooking-notes', noteForm)
+    await cookingNotes.create(noteForm)
     ElMessage.success('心得发布成功')
     // 先关闭对话框，延迟重置表单与刷新列表，避免状态更新打断 el-dialog 的关闭
     showCreateDialog.value = false

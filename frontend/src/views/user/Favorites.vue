@@ -101,7 +101,7 @@
  */
 import { ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
-import api from '../../api'
+import { users } from '../../api'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 const router = useRouter()
@@ -134,9 +134,7 @@ function onTabChange() {
 async function load() {
   loading.value = true
   try {
-    const res = await api.get('/users/favorites', {
-      params: { favorite_type: tab.value, page: page.value, page_size: pageSize },
-    })
+    const res = await users.favorites({ favorite_type: tab.value, page: page.value, page_size: pageSize })
     items.value = res.items || []
     total.value = res.total || 0
   } catch (e) {
@@ -157,7 +155,7 @@ async function removeFav(id) {
     return  // 用户取消
   }
   try {
-    await api.delete(`/users/favorites/${id}`)
+    await users.removeFavorite(id)
     ElMessage.closeAll()  // 清除残留的 ElMessageBox 遮罩和 toast
     ElMessage.success('已取消收藏')
     // 若当前页删除后为空且非第一页，回退一页
