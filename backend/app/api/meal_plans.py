@@ -10,36 +10,19 @@
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import func, update
+from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
-from datetime import datetime
 
 from app.database import get_db
-from app.models import MealPlan, MealPlanItem, Recipe, RecipeIngredient, UserBrowseHistory
+from app.models import MealPlan, MealPlanItem, Recipe, RecipeIngredient
 from app.schemas.interaction import (
     MealPlanCreate, MealPlanListOut, MealPlanDetailOut, MealPlanItemOut,
 )
 from app.schemas.common import PaginatedResponse, SuccessResponse
 from app.core.deps import get_current_user, get_optional_user
+from app.utils.browse_history import upsert_browse_history
 
 router = APIRouter()
-
-
-def _record_browse_history(db: Session, user_id: int | None, meal_plan_id: int):
-    """自动记录套餐浏览历史（登录用户，去重避免表膨胀）"""
-    if user_id is None:
-        return
-    now = datetime.now()
-    existing = db.query(UserBrowseHistory).filter(
-        UserBrowseHistory.user_id == user_id,
-        UserBrowseHistory.meal_plan_id == meal_plan_id,
-    ).first()
-    if existing:
-        existing.viewed_at = now
-    else:
-        db.add(UserBrowseHistory(
-            user_id=user_id, meal_plan_id=meal_plan_id, viewed_at=now
-        ))
 
 
 @router.get("", response_model=PaginatedResponse[MealPlanListOut])
@@ -186,7 +169,10 @@ def get_meal_plan(
         db.execute(
             update(MealPlan).where(MealPlan.id == plan_id).values(view_count=MealPlan.view_count + 1)
         )
-    _record_browse_history(db, current_user.id if current_user else None, plan_id)
+    # 记录浏览历史（登录用户，公共 upsert 去重 + 并发唯一约束兜底）
+    upsert_browse_history(
+        db, current_user.id if current_user else None, meal_plan_id=plan_id
+    )
     db.commit()
     db.refresh(plan)
 

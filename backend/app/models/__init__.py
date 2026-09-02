@@ -166,6 +166,10 @@ class Ingredient(Base):
     name = Column(String(100), unique=True, nullable=False)
     category = Column(String(50), nullable=True)
     image_url = Column(String(500), nullable=True)
+    # 审核状态：管理员创建/导入的食材默认 approved；普通用户提交的进入 pending 待审核
+    status = Column(String(20), nullable=False, server_default="approved")
+    # 提交人（普通用户提交时记录，管理员创建为 NULL）
+    submitted_by = Column(Integer, nullable=True)
     created_at = Column(DateTime, nullable=False, server_default=func.now())
 
     # ---- 营养与忌口扩展示段（由计算脚本回填，用于估算营养、过敏原/忌口过滤）----

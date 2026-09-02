@@ -39,10 +39,21 @@
             <span class="name-text">{{ row.name }}</span>
           </template>
         </el-table-column>
-        <el-table-column prop="category" label="分类" width="180">
+        <el-table-column prop="category" label="分类" width="160">
           <template #default="{ row }">
             <el-tag v-if="row.category" type="info" effect="plain" size="small">{{ row.category }}</el-tag>
             <span v-else style="color: #909399">—</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="状态" width="110">
+          <template #default="{ row }">
+            <el-tag
+              :type="row.status === 'approved' ? 'success' : row.status === 'pending' ? 'warning' : 'danger'"
+              effect="plain"
+              size="small"
+            >
+              {{ statusMap[row.status] || row.status }}
+            </el-tag>
           </template>
         </el-table-column>
         <el-table-column label="操作" width="160" align="center" fixed="right">
@@ -115,12 +126,14 @@ const filteredIngredients = computed(() => {
 
 const editVisible = ref(false)
 const editForm = ref({ id: null, name: '', category: '' })
+const statusMap = { approved: '已通过', pending: '待审核', rejected: '已驳回' }
 
 async function load() {
   loading.value = true
   try {
+    // 管理页查看全部状态（含待审核/已驳回）；status=all 仅管理员可用
     const res = await admin.ingredients({
-      page: page.value, page_size: pageSize,
+      page: page.value, page_size: pageSize, status: 'all',
     })
     // 后端返回 { total, page, page_size, items }，需取 items 字段
     ingredients.value = Array.isArray(res) ? res : (res.items || [])

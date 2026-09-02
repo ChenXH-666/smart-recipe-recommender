@@ -20,7 +20,7 @@ from app.models import Recipe, MealPlan, Tag, Ingredient, User, RecipeTag, Recip
 from app.schemas.admin import AuditAction, AdminRecipeListOut, AdminMealPlanListOut
 from app.schemas.recipe import RecipeDetail, RecipeUpdate
 from app.schemas.common import PaginatedResponse, SuccessResponse
-from app.core.deps import get_admin_user
+from app.core.deps import get_admin_user, get_current_user, get_optional_user
 from app.services.rag_service import sync_recipe_to_chroma_by_id, remove_from_chroma
 
 router = APIRouter()
@@ -34,6 +34,7 @@ def get_stats(db: Session = Depends(get_db), admin=Depends(get_admin_user)):
         "total_recipes": db.query(Recipe).filter(Recipe.is_deleted == 0).count(),
         "pending_recipes": db.query(Recipe).filter(Recipe.is_deleted == 0, Recipe.status == "pending").count(),
         "pending_meal_plans": db.query(MealPlan).filter(MealPlan.is_deleted == 0, MealPlan.status == "pending").count(),
+        "pending_ingredients": db.query(Ingredient).filter(Ingredient.status == "pending").count(),
         "total_users": db.query(User).count(),
         "total_meal_plans": db.query(MealPlan).filter(MealPlan.is_deleted == 0).count(),
         "total_tags": db.query(Tag).count(),
@@ -140,19 +141,64 @@ def list_ingredients(
     page: int = Query(1, ge=1),
     page_size: int = Query(100, ge=1, le=500),
     category: str = Query(None, description="按分类筛选"),
+    status: str = Query(None, description="状态筛选：pending/rejected/all（仅管理员可见，默认只返回已审核通过的）"),
+    keyword: str = Query(None, description="按名称模糊搜索"),
     db: Session = Depends(get_db),
+    current_user=Depends(get_optional_user),
 ):
-    """食材列表（公开，分页）"""
+    """食材列表（分页）。
+
+    权限与状态规则：
+      - 默认（不传 status）：仅返回 approved 食材，公开 —— 创建菜谱/套餐的下拉选择使用
+      - status=pending/rejected/all：仅管理员可用，供食材审核页与食材管理页使用
+    """
+    # 管理员专属的状态视图：非管理员请求会被拒绝，防止未审核食材流入公开下拉
+    if status is not None:
+        if current_user is None or current_user.role != "admin":
+            raise HTTPException(status_code=403, detail="仅管理员可按状态查看食材")
+        if status not in ("pending", "approved", "rejected", "all"):
+            raise HTTPException(status_code=400, detail="status 必须为 pending/approved/rejected/all")
+
     query = db.query(Ingredient)
+    if status is None:
+        query = query.filter(Ingredient.status == "approved")
+    elif status != "all":
+        query = query.filter(Ingredient.status == status)
     if category:
         query = query.filter(Ingredient.category == category)
+    if keyword and keyword.strip():
+        query = query.filter(Ingredient.name.like(f"%{keyword.strip()}%"))
     total = query.count()
-    ingredients = query.order_by(Ingredient.id.asc()).offset((page - 1) * page_size).limit(page_size).all()
+    ingredients = query.order_by(Ingredient.id.desc()).offset((page - 1) * page_size).limit(page_size).all()
+
+    # 管理员视图补充提交人昵称（公开视图不返回 submitted_by，避免信息泄露）
+    submitter_map = {}
+    if status is not None:
+        submitter_ids = {i.submitted_by for i in ingredients if i.submitted_by}
+        if submitter_ids:
+            rows = db.query(User.id, User.nickname, User.username).filter(User.id.in_(submitter_ids)).all()
+            submitter_map = {r.id: (r.nickname or r.username) for r in rows}
+
+    items = []
+    for i in ingredients:
+        item = {
+            "id": i.id,
+            "name": i.name,
+            "category": i.category,
+            "image_url": i.image_url,
+            "status": i.status,
+            "created_at": i.created_at,
+        }
+        if status is not None:
+            item["submitted_by"] = i.submitted_by
+            item["submitter_name"] = submitter_map.get(i.submitted_by, "")
+        items.append(item)
+
     return {
         "total": total,
         "page": page,
         "page_size": page_size,
-        "items": [{"id": i.id, "name": i.name, "category": i.category, "image_url": i.image_url} for i in ingredients],
+        "items": items,
     }
 
 
@@ -162,15 +208,52 @@ def create_ingredient(
     category: str = Query(None, max_length=50),
     image_url: str = Query(None, max_length=500),
     db: Session = Depends(get_db),
-    admin=Depends(get_admin_user),
+    current_user=Depends(get_current_user),
 ):
-    """创建食材 —— 需要管理员权限，防重复（name 唯一）"""
+    """创建/提交食材 —— 需要登录。
+
+    与菜谱/套餐一致的审核模式：
+      - 管理员创建：直接 approved（原行为，食材管理页使用）
+      - 普通用户提交：进入 pending，等待管理员在「食材审核」页审核
+    防重复（name 唯一）。
+    """
     if db.query(Ingredient).filter(Ingredient.name == name).first():
         raise HTTPException(status_code=400, detail="食材已存在")
-    ing = Ingredient(name=name, category=category, image_url=image_url)
+    is_admin = current_user.role == "admin"
+    ing = Ingredient(
+        name=name,
+        category=category,
+        image_url=image_url,
+        status="approved" if is_admin else "pending",
+        submitted_by=None if is_admin else current_user.id,
+    )
     db.add(ing)
     db.commit()
-    return SuccessResponse(message="创建成功", id=ing.id)
+    return SuccessResponse(
+        message="创建成功" if is_admin else "提交成功，等待管理员审核",
+        id=ing.id,
+    )
+
+
+@router.post("/ingredients/{ingredient_id}/audit", response_model=SuccessResponse)
+def audit_ingredient(
+    ingredient_id: int,
+    data: AuditAction,
+    db: Session = Depends(get_db),
+    admin=Depends(get_admin_user),
+):
+    """审核用户提交的食材 —— 管理员执行 approve/reject 操作。
+
+    驳回的食材不再出现在创建菜谱的食材下拉中；
+    审核通过的食材对所有人可见（可被选入菜谱）。
+    """
+    ing = db.query(Ingredient).filter(Ingredient.id == ingredient_id).first()
+    if not ing:
+        raise HTTPException(status_code=404, detail="食材不存在")
+
+    ing.status = "approved" if data.action == "approve" else "rejected"
+    db.commit()
+    return SuccessResponse(message=f"已{'通过' if data.action == 'approve' else '驳回'}")
 
 
 @router.put("/ingredients/{ingredient_id}", response_model=SuccessResponse)

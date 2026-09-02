@@ -34,12 +34,16 @@ export default defineConfig({
     port: 3000,
     allowedHosts: true,   // 开发环境放行ngrok随机域名，解决Blocked报错
     proxy: {
+      // 注意 target 必须用 127.0.0.1 而非 localhost：
+      // uvicorn 仅绑定 IPv4 127.0.0.1，本机 localhost 会优先解析到 ::1，
+      // IPv6 环回连接会被静默丢弃、约 2 秒后才超时回退 IPv4，
+      // 导致偶发"加载中卡 1-2 秒"（连接重建时命中该黑洞）
       '/api': {
-        target: 'http://localhost:8000',
+        target: 'http://127.0.0.1:8000',
         changeOrigin: true,
       },
       '/static': {
-        target: 'http://localhost:8000',
+        target: 'http://127.0.0.1:8000',
         changeOrigin: true,
       }
     }

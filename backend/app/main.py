@@ -11,7 +11,7 @@
   main.py          → 应用入口，创建 FastAPI 实例，注册中间件和路由
   config.py        → 集中管理所有配置（数据库、JWT、LLM、RAG参数）
   database.py      → 数据库引擎和会话管理（SQLAlchemy）
-  models/          → 数据库 ORM 模型（15张表，按用户/菜谱/互动/AI四大模块组织）
+  models/          → 数据库 ORM 模型（16张表，按用户/菜谱/互动/AI四大模块组织）
   schemas/         → Pydantic 数据验证模型（请求体/响应体定义）
   api/             → API 路由层（RESTful 接口，按业务模块拆分）
   services/        → 业务逻辑层（AI对话、RAG检索、推荐引擎）

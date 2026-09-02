@@ -33,6 +33,16 @@
                 {{ plan.view_count || 0 }} 次浏览
               </span>
             </div>
+            <!-- 被驳回的套餐：向作者/管理员展示驳回原因（其他人无法访问此状态详情） -->
+            <el-alert
+              v-if="plan.status === 'rejected' && plan.review_comment"
+              type="error"
+              :closable="false"
+              show-icon
+              class="reject-alert"
+            >
+              <template #title>审核未通过：{{ plan.review_comment }}</template>
+            </el-alert>
             <div class="action-row" v-if="userStore.isLoggedIn">
               <!-- 仅在套餐已审核通过时才显示收藏按钮：pending/rejected 资源后端会拒绝收藏，避免按钮点击后报错 -->
               <el-button v-if="plan.status === 'approved'" :type="isFaved ? 'warning' : 'primary'" @click="toggleFavorite">
@@ -50,6 +60,15 @@
               <el-button v-if="canEdit" type="danger" plain @click="handleDelete">
                 <el-icon><Delete /></el-icon>
                 删除套餐
+              </el-button>
+              <!-- 管理员可在详情页直接审核（通过/驳回），无需返回审核列表 -->
+              <el-button v-if="canAudit" type="success" @click="openAudit('approve')">
+                <el-icon><Check /></el-icon>
+                通过
+              </el-button>
+              <el-button v-if="canAudit" type="danger" plain @click="openAudit('reject')">
+                <el-icon><Close /></el-icon>
+                驳回
               </el-button>
               <el-button type="primary" plain @click="openShopping">
                 <el-icon><ShoppingCart /></el-icon>
@@ -83,6 +102,32 @@
           <el-button type="primary" @click="copyShopping">
             <el-icon><CopyDocument /></el-icon>复制清单
           </el-button>
+        </template>
+      </el-dialog>
+
+      <!-- 管理员审核对话框（声明式 el-dialog，与审核列表页保持一致） -->
+      <el-dialog
+        v-model="auditDialogVisible"
+        :title="auditAction === 'approve' ? '通过审核' : '驳回审核'"
+        width="500px"
+        :close-on-click-modal="false"
+        append-to-body
+      >
+        <el-form label-position="top">
+          <el-form-item :label="auditAction === 'approve' ? '审核意见（可选）' : '审核意见（必填）'">
+            <el-input
+              v-model="auditComment"
+              type="textarea"
+              :rows="4"
+              :placeholder="auditAction === 'approve' ? '可填写审核意见，留空则直接通过' : '请填写驳回原因'"
+              maxlength="500"
+              show-word-limit
+            />
+          </el-form-item>
+        </el-form>
+        <template #footer>
+          <el-button @click="auditDialogVisible = false">取消</el-button>
+          <el-button type="primary" @click="confirmAudit" :loading="auditLoading">确定</el-button>
         </template>
       </el-dialog>
 
@@ -124,7 +169,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useUserStore } from '../stores/user'
 import { Star, Edit, Delete, ShoppingCart, CopyDocument } from '@element-plus/icons-vue'
 import { ElMessageBox, ElMessage } from 'element-plus'
-import { mealPlans, users } from '../api'
+import { mealPlans, users, admin } from '../api'
 
 const route = useRoute()
 const router = useRouter()
@@ -175,6 +220,57 @@ function copyPlan() {
 const canEdit = computed(() => {
   return userStore.isLoggedIn && plan.value && userStore.user?.id === plan.value.user_id
 })
+
+// 管理员可在详情页对待审核套餐直接执行通过/驳回
+const canAudit = computed(() => {
+  return userStore.isAdmin && plan.value?.status === 'pending'
+})
+
+// 审核对话框状态
+const auditDialogVisible = ref(false)
+const auditAction = ref('approve')
+const auditComment = ref('')
+const auditLoading = ref(false)
+
+// 打开审核对话框（approve=通过 / reject=驳回）
+function openAudit(action) {
+  auditAction.value = action
+  auditComment.value = ''
+  auditDialogVisible.value = true
+}
+
+// 确认审核：校验驳回意见 → 调用 API → 关闭对话框 → 重新加载详情刷新状态
+async function confirmAudit() {
+  if (auditAction.value === 'reject' && !auditComment.value.trim()) {
+    ElMessage.warning('驳回时必须填写驳回意见')
+    return
+  }
+  auditLoading.value = true
+  try {
+    await admin.auditMealPlan(plan.value.id, {
+      action: auditAction.value,
+      comment: auditComment.value.trim(),
+    })
+    ElMessage.closeAll()  // 清除残留 toast，避免阻挡对话框关闭动画
+    ElMessage.success(auditAction.value === 'approve' ? '已通过审核' : '已驳回')
+    auditDialogVisible.value = false
+    loadPlan()
+  } catch (e) {
+    // 错误已由全局拦截器提示
+  } finally {
+    auditLoading.value = false
+  }
+}
+
+// 加载套餐详情（onMounted 与审核完成后复用）
+async function loadPlan() {
+  try {
+    plan.value = await mealPlans.detail(route.params.id)
+  } catch (e) {
+    // 404 或其他错误：保持 plan.value = null，触发兜底 UI；错误已由全局拦截器提示
+    plan.value = null
+  }
+}
 
 function formatDate(d) {
   if (!d) return '—'
@@ -249,16 +345,12 @@ async function handleDelete() {
 
 onMounted(async () => {
   try {
-    plan.value = await mealPlans.detail(route.params.id)
+    await loadPlan()
     // 登录用户：检查收藏状态（浏览历史已由后端 GET 详情接口自动记录，
     // 前端不再手动 POST /users/history，避免与后端双写产生重复浏览记录）
     if (userStore.isLoggedIn) {
       checkFavoriteStatus()
     }
-  } catch (e) {
-    // 404 或其他错误：保持 plan.value = null，触发 v-if="!loading && !plan" 兜底 UI
-    // 错误已由全局拦截器提示（如登录过期），此处仅需静默处理避免 "Unhandled error" Vue 警告
-    plan.value = null
   } finally {
     loading.value = false
   }
@@ -345,6 +437,10 @@ onMounted(async () => {
   padding-top: 16px;
   margin-top: 4px;
   border-top: 1px solid #ebeef5;
+}
+
+.reject-alert {
+  margin-top: 12px;
 }
 
 .section-card {

@@ -46,6 +46,16 @@
                 {{ tag.name }}
               </el-tag>
             </div>
+            <!-- 被驳回的菜谱：向作者/管理员展示驳回原因（其他人无法访问此状态详情） -->
+            <el-alert
+              v-if="recipe.status === 'rejected' && recipe.review_comment"
+              type="error"
+              :closable="false"
+              show-icon
+              class="reject-alert"
+            >
+              <template #title>审核未通过：{{ recipe.review_comment }}</template>
+            </el-alert>
             <div class="action-row">
               <!-- 仅在菜谱已审核通过时才显示收藏按钮：pending/rejected 资源后端会拒绝收藏，避免按钮点击后报错 -->
               <el-button v-if="userStore.isLoggedIn && recipe.status === 'approved'" :type="isFaved ? 'warning' : 'primary'" @click="toggleFavorite">
@@ -59,6 +69,15 @@
               <el-button v-if="canEdit" type="success" @click="$router.push('/recipes/' + recipe.id + '/edit')">
                 <el-icon><Edit /></el-icon>
                 编辑菜谱
+              </el-button>
+              <!-- 管理员可在详情页直接审核（通过/驳回），无需返回审核列表 -->
+              <el-button v-if="canAudit" type="success" @click="openAudit('approve')">
+                <el-icon><Check /></el-icon>
+                通过
+              </el-button>
+              <el-button v-if="canAudit" type="danger" plain @click="openAudit('reject')">
+                <el-icon><Close /></el-icon>
+                驳回
               </el-button>
               <el-button
                 v-if="userStore.isLoggedIn && recipe.status === 'approved'"
@@ -268,6 +287,32 @@
         </el-col>
       </el-row>
     </template>
+
+    <!-- 管理员审核对话框（声明式 el-dialog，与审核列表页保持一致） -->
+    <el-dialog
+      v-model="auditDialogVisible"
+      :title="auditAction === 'approve' ? '通过审核' : '驳回审核'"
+      width="500px"
+      :close-on-click-modal="false"
+      append-to-body
+    >
+      <el-form label-position="top">
+        <el-form-item :label="auditAction === 'approve' ? '审核意见（可选）' : '审核意见（必填）'">
+          <el-input
+            v-model="auditComment"
+            type="textarea"
+            :rows="4"
+            :placeholder="auditAction === 'approve' ? '可填写审核意见，留空则直接通过' : '请填写驳回原因'"
+            maxlength="500"
+            show-word-limit
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="auditDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="confirmAudit" :loading="auditLoading">确定</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -293,7 +338,7 @@ import { ElMessage } from 'element-plus'
 import { useUserStore } from '../stores/user'
 import { useRecipeCartStore } from '../stores/recipeCart'
 import { User } from '@element-plus/icons-vue'
-import { recipes, users, reviews as reviewsApi } from '../api'
+import { recipes, users, reviews as reviewsApi, admin } from '../api'
 
 const route = useRoute()
 const cart = useRecipeCartStore()
@@ -314,6 +359,47 @@ const difficultyTypeMap = { easy: 'success', medium: 'warning', hard: 'danger' }
 const canEdit = computed(() => {
   return userStore.isLoggedIn && recipe.value && userStore.user?.id === recipe.value.author_id
 })
+
+// 管理员可在详情页对待审核菜谱直接执行通过/驳回
+const canAudit = computed(() => {
+  return userStore.isAdmin && recipe.value?.status === 'pending'
+})
+
+// 审核对话框状态
+const auditDialogVisible = ref(false)
+const auditAction = ref('approve')
+const auditComment = ref('')
+const auditLoading = ref(false)
+
+// 打开审核对话框（approve=通过 / reject=驳回）
+function openAudit(action) {
+  auditAction.value = action
+  auditComment.value = ''
+  auditDialogVisible.value = true
+}
+
+// 确认审核：校验驳回意见 → 调用 API → 关闭对话框 → 重新加载详情刷新状态
+async function confirmAudit() {
+  if (auditAction.value === 'reject' && !auditComment.value.trim()) {
+    ElMessage.warning('驳回时必须填写驳回意见')
+    return
+  }
+  auditLoading.value = true
+  try {
+    await admin.auditRecipe(recipe.value.id, {
+      action: auditAction.value,
+      comment: auditComment.value.trim(),
+    })
+    ElMessage.closeAll()  // 清除残留 toast，避免阻挡对话框关闭动画
+    ElMessage.success(auditAction.value === 'approve' ? '已通过审核' : '已驳回')
+    auditDialogVisible.value = false
+    loadData()
+  } catch (e) {
+    // 错误已由全局拦截器提示
+  } finally {
+    auditLoading.value = false
+  }
+}
 
 // 检查当前登录用户是否已对当前菜谱发表过点评
 // 后端业务规则：一个用户对同一菜谱只能点评一次。已点评后应隐藏"写点评"按钮
@@ -506,6 +592,10 @@ onMounted(async () => {
   display: flex !important;
   align-items: center;
   gap: 4px;
+}
+
+.reject-alert {
+  margin-bottom: 16px;
 }
 
 .action-row {

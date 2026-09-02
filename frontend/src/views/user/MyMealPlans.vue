@@ -27,6 +27,9 @@
             <el-tag v-if="!p.is_public" size="small" type="info" effect="plain">仅自己</el-tag>
           </div>
           <p class="desc">{{ p.description || '暂无描述' }}</p>
+          <p v-if="p.status === 'rejected' && p.review_comment" class="reject-reason">
+            <el-icon><WarningFilled /></el-icon>驳回原因：{{ p.review_comment }}
+          </p>
           <div class="meta">
             <span><el-icon><View /></el-icon>{{ p.view_count }}</span>
             <span><el-icon><Star /></el-icon>{{ p.favorite_count }}</span>
@@ -173,6 +176,19 @@ load()
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+/* 驳回原因（已驳回的套餐展示） */
+.reject-reason {
+  color: #dc2626;
+  font-size: 12px;
+  margin: 0 0 6px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .meta { display: flex; gap: 16px; color: #909399; font-size: 12px; align-items: center; }
 .meta .el-icon { margin-right: 2px; vertical-align: -2px; }

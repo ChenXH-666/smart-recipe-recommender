@@ -292,11 +292,6 @@ async function submitNote() {
     submitting.value = false
   }
 }
-
-onMounted(() => {
-  load()
-  loadRecipes()
-})
 </script>
 
 <style scoped>

@@ -30,6 +30,7 @@ const routes = [
       { path: 'hot-recipes', name: 'HotRecipes', component: () => import('../views/HotRecipes.vue') },
       { path: 'recipes', name: 'Recipes', component: () => import('../views/RecipeList.vue') },
       { path: 'recipes/create', name: 'RecipeCreate', component: () => import('../views/RecipeCreate.vue'), meta: { requiresAuth: true } },
+      { path: 'ingredients/create', name: 'IngredientCreate', component: () => import('../views/IngredientCreate.vue'), meta: { requiresAuth: true } },
       { path: 'recipes/:id', name: 'RecipeDetail', component: () => import('../views/RecipeDetail.vue') },
       { path: 'recipes/:id/edit', name: 'RecipeEdit', component: () => import('../views/RecipeEdit.vue'), meta: { requiresAuth: true } },
       { path: 'meal-plans', name: 'MealPlans', component: () => import('../views/MealPlanList.vue') },
@@ -83,6 +84,7 @@ const routes = [
       { path: 'users', name: 'AdminUsers', component: () => import('../views/admin/UserManage.vue') },
       { path: 'tags', name: 'AdminTags', component: () => import('../views/admin/TagManage.vue') },
       { path: 'ingredients', name: 'AdminIngredients', component: () => import('../views/admin/IngredientManage.vue') },
+      { path: 'ingredient-audit', name: 'AdminIngredientAudit', component: () => import('../views/admin/IngredientAudit.vue') },
       // 旧路径兼容重定向（PRD 6.2.2 路径对齐）
       { path: 'recipes', redirect: '/admin/recipe-audit' },
       { path: 'meal-plans', redirect: '/admin/meal-plan-audit' },

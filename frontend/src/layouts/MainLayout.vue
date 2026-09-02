@@ -209,6 +209,7 @@ const breadcrumbs = computed(() => {
   const adminPages = {
     'admin/recipe-audit': '菜谱审核',
     'admin/meal-plan-audit': '套餐审核',
+    'admin/ingredient-audit': '食材审核',
     'admin/users': '用户管理',
     'admin/tags': '标签管理',
     'admin/ingredients': '食材管理',
@@ -244,6 +245,7 @@ const breadcrumbs = computed(() => {
     'hot-recipes': { name: '热门菜谱' },
     recipes: { name: '菜谱浏览' },
     'recipes/create': { name: '创建菜谱' },
+    'ingredients/create': { name: '创建食材' },
     'meal-plans': { name: '套餐广场' },
     'meal-plans/create': { name: '创建套餐' },
     'cooking-notes': { name: '烹饪心得' },

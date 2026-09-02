@@ -240,3 +240,95 @@ class TestMealPlans:
     def test_create_plan_requires_auth(self, client):
         assert client.post("/api/meal-plans",
                            json={"title": "匿名套餐", "items": []}).status_code == 401
+
+
+# ------------------------------- 食材提交与审核 -------------------------------
+
+def _register_admin(client, db, username="boss", email="boss@a.com"):
+    """注册并提升为管理员，返回 (token, uid)"""
+    from app.models import User
+    uid = _register(client, username=username, email=email)
+    db.query(User).filter(User.id == uid).update({"role": "admin"})
+    db.commit()
+    return _login(client, username=username), uid
+
+
+class TestIngredientSubmitAndAudit:
+    def test_user_submit_pending_then_admin_approve(self, client, db):
+        _register(client)
+        token = _login(client)
+
+        # 普通用户提交食材 → pending
+        r = client.post("/api/admin/ingredients",
+                        params={"name": "羽衣甘蓝", "category": "蔬菜"},
+                        headers=_auth(token))
+        assert r.status_code == 200, r.text
+        ing_id = r.json()["id"]
+
+        # 未审核食材不出现在公开列表（创建菜谱下拉使用）
+        pub = client.get("/api/admin/ingredients")
+        assert pub.json()["total"] == 0
+
+        # 普通用户不能按状态查看（管理员专属）
+        assert client.get("/api/admin/ingredients",
+                          params={"status": "pending"},
+                          headers=_auth(token)).status_code == 403
+
+        # 管理员看待审核列表，提交人昵称已回填
+        admin_token, _ = _register_admin(client, db)
+        pending = client.get("/api/admin/ingredients", params={"status": "pending"},
+                              headers=_auth(admin_token))
+        assert pending.json()["total"] == 1
+        item = pending.json()["items"][0]
+        assert item["id"] == ing_id
+        assert item["status"] == "pending"
+        assert item["submitter_name"] == "chef"
+
+        # 审核通过 → 公开列表可见
+        audit = client.post(f"/api/admin/ingredients/{ing_id}/audit",
+                            json={"action": "approve"}, headers=_auth(admin_token))
+        assert audit.status_code == 200
+        pub = client.get("/api/admin/ingredients")
+        assert pub.json()["total"] == 1
+        assert pub.json()["items"][0]["name"] == "羽衣甘蓝"
+
+    def test_admin_reject_ingredient_hidden_from_public(self, client, db):
+        _register(client)
+        token = _login(client)
+        r = client.post("/api/admin/ingredients",
+                        params={"name": "猫耳朵"},
+                        headers=_auth(token))
+        ing_id = r.json()["id"]
+
+        admin_token, _ = _register_admin(client, db, username="boss2", email="boss2@a.com")
+        audit = client.post(f"/api/admin/ingredients/{ing_id}/audit",
+                            json={"action": "reject"}, headers=_auth(admin_token))
+        assert audit.status_code == 200
+
+        # 驳回食材不出现在公开列表，但管理员在已驳回视图可见
+        assert client.get("/api/admin/ingredients").json()["total"] == 0
+        rejected = client.get("/api/admin/ingredients", params={"status": "rejected"},
+                              headers=_auth(admin_token))
+        assert rejected.json()["total"] == 1
+
+    def test_admin_create_directly_approved_and_duplicate_guard(self, client, db):
+        admin_token, _ = _register_admin(client, db)
+        r = client.post("/api/admin/ingredients",
+                        params={"name": "admin蔬菜", "category": "蔬菜"},
+                        headers=_auth(admin_token))
+        assert r.status_code == 200
+
+        # 管理员创建的食材直接 approved，公开列表立即可见
+        pub = client.get("/api/admin/ingredients")
+        assert pub.json()["total"] == 1
+        assert pub.json()["items"][0]["status"] == "approved"
+
+        # 重名拦截
+        dup = client.post("/api/admin/ingredients",
+                          params={"name": "admin蔬菜"},
+                          headers=_auth(admin_token))
+        assert dup.status_code == 400
+
+    def test_submit_requires_login(self, client):
+        assert client.post("/api/admin/ingredients",
+                           params={"name": "匿名食材"}).status_code == 401

@@ -23,16 +23,17 @@
 | 互动模块 | 菜谱评分点评、烹饪心得分享(创建+浏览) |
 | 智能推荐 | 基于用户历史的个性化推荐、预算筛选推荐、自然语言搜索推荐；新号走冷启动多样推荐、忌口过滤前置 |
 | AI 助手 | 流式多轮对话、RAG 增强菜谱问答（两阶段检索：BGE-M3 粗排召回 + bge-reranker-v2-m3 交叉编码精排，分数融合 α=0.5 微调排序，精排失败自动降级）、单菜/套餐智能推荐；仅推荐菜谱库内真实菜品，支持用户忌口过滤与预算感知（尽量用足预算） |
-| 套餐服务 | 套餐浏览、创建自定义套餐 |
+| 套餐服务 | 套餐浏览（广场卡片展示封面图）、创建自定义套餐、用户提交新食材（创建菜谱入口，待管理员审核） |
 
 ### 管理端
 | 模块 | 功能 |
 |------|------|
 | 仪表盘 | 实时统计数据(菜谱数/待审核/用户数) |
-| 菜谱审核 | 待审核菜谱审批(通过/拒绝) |
-| 套餐审核 | 待审核套餐审批 |
+| 菜谱审核 | 待审核菜谱审批（通过/驳回，驳回必填意见；菜谱详情页亦可直接审核，被驳回菜谱向作者展示驳回原因） |
+| 套餐审核 | 待审核套餐审批（通过/驳回，驳回必填意见；套餐详情页亦可直接审核，被驳回套餐向作者展示驳回原因） |
 | 标签管理 | 标签分类 CRUD |
-| 食材管理 | 食材增删查 |
+| 食材管理 | 食材增删查（含审核状态列） |
+| 食材审核 | 审核用户提交的食材（通过/驳回，通过后进入公共食材下拉） |
 | 用户管理 | 用户列表、启用/禁用 |
 
 ## 前端页面路由
@@ -43,12 +44,13 @@
 | `/for-you` | ForYouRecipes | 首页「为你推荐」更多（完整列表） |
 | `/hot-recipes` | HotRecipes | 首页「热门菜谱」更多（完整列表） |
 | `/recipes` | RecipeList | 菜谱浏览（筛选/搜索，难度支持多选，排序支持字段×方向自由组合） |
-| `/recipes/create` | RecipeCreate | 创建菜谱 |
-| `/recipes/:id` | RecipeDetail | 菜谱详情 + 评价 |
+| `/recipes/create` | RecipeCreate | 创建菜谱（食材清单头部提供「手动添加食材」入口） |
+| `/ingredients/create` | IngredientCreate | 创建食材（提交后待管理员审核） |
+| `/recipes/:id` | RecipeDetail | 菜谱详情 + 评价（管理员可在详情页直接审核；被驳回菜谱向作者展示驳回原因） |
 | `/recipes/:id/edit` | RecipeEdit | 编辑菜谱 |
-| `/meal-plans` | MealPlanList | 套餐广场 |
+| `/meal-plans` | MealPlanList | 套餐广场（卡片展示封面图） |
 | `/meal-plans/create` | MealPlanCreate | 创建套餐 |
-| `/meal-plans/:id` | MealPlanDetail | 套餐详情 |
+| `/meal-plans/:id` | MealPlanDetail | 套餐详情（管理员可在详情页直接审核；被驳回套餐向作者展示驳回原因） |
 | `/notes` | CookingNotes | 烹饪心得（浏览+发布） |
 | `/login` | Login | 登录 |
 | `/register` | Register | 注册 |
@@ -62,6 +64,7 @@
 | `/admin/meal-plans` | MealPlanAudit | 套餐审核 |
 | `/admin/tags` | TagManage | 标签管理 |
 | `/admin/ingredients` | IngredientManage | 食材管理 |
+| `/admin/ingredient-audit` | IngredientAudit | 食材审核（用户提交的食材） |
 | `/admin/users` | UserManage | 用户管理 |
 
 ## 后端 API 概览
@@ -77,7 +80,7 @@
 | `/api/ai` | AI 流式对话 |
 | `/api/recommendations` | 智能推荐 |
 | `/api/stats` | 首页统计（菜谱/套餐/用户总量 + 近7天新增） |
-| `/api/admin` | 后台管理 |
+| `/api/admin` | 后台管理（审核/标签/食材/用户管理；`GET /admin/ingredients` 默认仅返回已审核食材供下拉使用，传 `status` 参数仅管理员可用、非管理员返回 403；`POST /admin/ingredients` 允许登录用户提交新食材——管理员直接通过、普通用户进入待审核并记录提交人；`POST /admin/ingredients/{id}/audit` 审核用户提交的食材；`GET /admin/stats` 含 `pending_ingredients` 待审核食材数） |
 
 ## 项目结构
 
@@ -156,9 +159,11 @@ cd backend
 conda activate food
 python -m pytest tests -v --cov=app --cov-report=term-missing
 ```
-单元测试基于 pytest 编写，共 167 个用例，覆盖纯函数 / 模型 / 服务 / 接口四层；测试使用 SQLite 内存库并对 Chroma、LLM 等外部依赖打桩隔离，无需连接真实数据库与模型服务。整体行覆盖率约 59%，核心逻辑（配置、安全、统计、营养、工具函数、AI 引擎）覆盖率 76%~100%。
+单元测试基于 pytest 编写，共 171 个用例，覆盖纯函数 / 模型 / 服务 / 接口四层；测试使用 SQLite 内存库并对 Chroma、LLM 等外部依赖打桩隔离，无需连接真实数据库与模型服务。整体行覆盖率约 59%，核心逻辑（配置、安全、统计、营养、工具函数、AI 引擎）覆盖率 76%~100%。
 
 **存量库升级提示（v1.1 唯一约束）**：浏览历史表新增了防并发重复的数据库唯一约束。新库执行 `SQL/init.sql` 自动生效；**已有旧库**需手动迁移（先清重复行再加约束，SQL 见 `database_design.md` 3.9 节），否则并发双击仍可能产生重复浏览记录。
+
+**存量库升级提示（食材审核字段）**：食材表新增 `status`/`submitted_by` 两列（用户可提交新食材、管理员审核）。新库执行 `SQL/init.sql` 自动生效；**已有旧库**需手动迁移：`ALTER TABLE ingredients ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'approved'; ALTER TABLE ingredients ADD COLUMN submitted_by INT UNSIGNED NULL;` 执行后历史食材自动置为 `approved`，如需归入官方账号可执行 `UPDATE ingredients SET submitted_by=1;`（1 为默认官方管理员「官方小厨」的 ID，按实际账号调整）。
 
 ## 工程优化与性能设计
 
@@ -192,7 +197,7 @@ python -m pytest tests -v --cov=app --cov-report=term-missing
 
 | 优化项 | 位置 | 说明 |
 |--------|------|------|
-| 浏览历史 upsert 公共化 | `utils/browse_history.py` | 详情页与 /users/history 共用一份去重逻辑 |
+| 浏览历史 upsert 公共化 | `utils/browse_history.py` | 菜谱/套餐详情页与 /users/history 共用一份去重 + 并发兜底逻辑 |
 | 取消收藏公共逻辑 | `api/users.py` | 两个取消收藏接口共用递减+删除逻辑 |
 | 前端 API 命名端点统一 | `src/api/index.js` | 27 个文件 88 处字面量调用迁移为命名端点，路径集中管理 |
 
@@ -217,6 +222,6 @@ curl -H "Authorization: Bearer $TOKEN" "http://localhost:8000/api/recipes/1" &
 ## 注意事项
 
 - **API Key 配置**：请在 `backend/.env` 中配置真实的 API Key——LLM 用小米 Mimo Key（`LLM_API_KEY`），Embedding/Rerank 用 SiliconFlow Key（`EMBEDDING_API_KEY`，Rerank 自动复用），不要将密钥提交到版本控制
-- **向量数据库**：ChromaDB 使用本地持久化，数据库文件保存在 `backend/chroma_db/` 目录
+- **向量数据库**：ChromaDB 使用本地持久化，默认目录由 `CHROMA_PERSIST_DIR` 配置（默认 `F:/chroma_db`，纯 ASCII 绝对路径，避免 Windows 中文路径导致 HNSW 索引加载失败）；重建断点文件 `rebuild_checkpoint.json` 也保存在该目录下
 - **默认管理员**：运行导入脚本后自动创建管理员账号 `admin` / `admin123`
 - **反向代理部署提醒**：限流按"直连客户端 IP"计数。若把后端部署到 Nginx 等反向代理之后，所有请求的直连 IP 都会变成代理机（如 127.0.0.1），全部访客会共享同一个限流桶（一人触发限流、全体被限）。需给 uvicorn 加 `--proxy-headers --forwarded-allow-ips="代理机IP"`，使其读取 `X-Forwarded-For` 还原真实访客 IP。当前开发环境直连 8000 端口，无此问题

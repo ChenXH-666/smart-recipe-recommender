@@ -5,6 +5,8 @@
   - 流式响应生成器内部使用独立 session，避免依赖注入 session 被提前关闭
   - 生成器内部捕获所有异常，避免 SSE 中断导致前端无 [DONE] 标记
   - AI 回复保存失败不阻断响应（已发送给客户端的内容无法回滚）
+  - /chat 按客户端 IP 限流（20次/分钟）：每轮对话消耗 Embedding/Rerank/LLM
+    三类外部 API 额度，防止恶意刷接口造成成本失控
 """
 
 import json
@@ -19,6 +21,7 @@ from app.models import AiConversation, AiMessage
 from app.schemas.ai import AiChatRequest, RewindEditRequest
 from app.schemas.common import SuccessResponse
 from app.core.deps import get_current_user
+from app.core.rate_limit import rate_limit
 from app.services.ai_service import chat_stream, load_memory_from_db, clear_memory, has_memory
 from app.utils.recipe_diet import get_restriction_set
 
@@ -26,7 +29,7 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-@router.post("/chat")
+@router.post("/chat", dependencies=[Depends(rate_limit(20, 60, "ai_chat"))])
 async def ai_chat(
     data: AiChatRequest,
     db: Session = Depends(get_db),
@@ -37,6 +40,8 @@ async def ai_chat(
     安全：
       - 创建会话后立即校验 conv.id，避免后续操作使用 None
       - 生成器内部异常捕获，确保 SSE 始终以 [DONE] 结束
+      - 按客户端 IP 限流（20次/分钟）：每轮对话都会消耗 Embedding/Rerank/LLM
+        三类外部 API 额度，需防止恶意刷接口造成成本失控
     """
     # 创建或获取会话
     conversation_id = data.conversation_id

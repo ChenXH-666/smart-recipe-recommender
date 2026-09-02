@@ -62,7 +62,7 @@ import { DishDot, Collection, PriceTag, Food, User, Document, DataAnalysis, Menu
 import { admin } from '../../api'
 
 const loading = ref(true)
-const stats = ref({ recipes: 0, pendingRecipes: 0, pendingPlans: 0, users: 0, totalPlans: 0, totalTags: 0, totalIngredients: 0 })
+const stats = ref({ recipes: 0, pendingRecipes: 0, pendingPlans: 0, pendingIngredients: 0, users: 0, totalPlans: 0, totalTags: 0, totalIngredients: 0 })
 
 // 统计卡片：每张卡片可点击跳转到对应界面
 //  - 菜谱/套餐浏览界面（/recipes、/meal-plans）对所有登录用户可见
@@ -72,6 +72,7 @@ const statItems = [
   { title: '待审核菜谱', key: 'pendingRecipes', icon: Document, color: '#e6a23c', iconBg: '#fdf6ec', path: '/admin/recipe-audit' },
   { title: '套餐总数', key: 'totalPlans', icon: Collection, color: '#409eff', iconBg: '#ecf5ff', path: '/meal-plans' },
   { title: '待审核套餐', key: 'pendingPlans', icon: DataAnalysis, color: '#e6a23c', iconBg: '#fdf6ec', path: '/admin/meal-plan-audit' },
+  { title: '待审核食材', key: 'pendingIngredients', icon: Food, color: '#e6a23c', iconBg: '#fdf6ec', path: '/admin/ingredient-audit' },
   { title: '标签总数', key: 'totalTags', icon: PriceTag, color: '#e6a23c', iconBg: '#fdf6ec', path: '/admin/tags' },
   { title: '食材总数', key: 'totalIngredients', icon: Food, color: '#f56c6c', iconBg: '#fef0f0', path: '/admin/ingredients' },
   { title: '用户总数', key: 'users', icon: User, color: '#67c23a', iconBg: '#f0f9eb', path: '/admin/users' },
@@ -81,6 +82,7 @@ const statItems = [
 const links = [
   { path: '/admin/recipe-audit', title: '菜谱审核', desc: '审核用户提交的菜谱', icon: DishDot, color: '#2563eb', iconBg: '#eff6ff' },
   { path: '/admin/meal-plan-audit', title: '套餐审核', desc: '审核用户创建的套餐', icon: Collection, color: '#67c23a', iconBg: '#f0f9eb' },
+  { path: '/admin/ingredient-audit', title: '食材审核', desc: '审核用户提交的食材', icon: Food, color: '#e6a23c', iconBg: '#fdf6ec' },
   { path: '/admin/tags', title: '标签管理', desc: '管理菜谱标签分类', icon: PriceTag, color: '#e6a23c', iconBg: '#fdf6ec' },
   { path: '/admin/ingredients', title: '食材管理', desc: '管理食材与分类', icon: Food, color: '#f56c6c', iconBg: '#fef0f0' },
   { path: '/admin/users', title: '用户管理', desc: '管理用户与权限', icon: User, color: '#909399', iconBg: '#f4f4f5' },
@@ -93,6 +95,7 @@ onMounted(async () => {
       recipes: res.total_recipes || 0,
       pendingRecipes: res.pending_recipes || 0,
       pendingPlans: res.pending_meal_plans || 0,
+      pendingIngredients: res.pending_ingredients || 0,
       totalPlans: res.total_meal_plans || 0,
       totalTags: res.total_tags || 0,
       totalIngredients: res.total_ingredients || 0,

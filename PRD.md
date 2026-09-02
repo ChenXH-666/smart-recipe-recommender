@@ -92,7 +92,7 @@
 
 ### 2.1 功能模块全景
 
-系统按开题报告划分为六大模块，共计 44 项功能点：
+系统按开题报告划分为六大模块，共计 47 项功能点：
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
@@ -110,7 +110,7 @@
 | 编号 | 功能名称 | 功能描述 | 优先级 |
 |------|---------|---------|--------|
 | FR-R01 | 菜谱列表 | 分页展示已审核菜谱，支持关键词搜索、难度多选、标签筛选、预算区间筛选；排序支持「字段（时间/价格/难度）× 方向（升/降）」自由组合 | P0 |
-| FR-R02 | 菜谱详情 | 展示菜谱标题、封面、描述、标签、食材列表、烹饪步骤、浏览/收藏数、作者信息；自动记录浏览历史 | P0 |
+| FR-R02 | 菜谱详情 | 展示菜谱标题、封面、描述、标签、食材列表、烹饪步骤、浏览/收藏数、作者信息；自动记录浏览历史；被驳回的菜谱向作者/管理员展示驳回原因，管理员可在详情页直接执行通过/驳回 | P0 |
 | FR-R03 | 菜谱创建 | 登录用户可创建菜谱（基础信息+食材+步骤+标签），普通用户提交后进入 `pending` 审核状态，管理员直接 `approved` | P0 |
 | FR-R04 | 菜谱编辑 | 作者可编辑自己的菜谱，采用"先删后插"策略更新关联数据 | P0 |
 | FR-R05 | 菜谱删除 | 作者可软删除自己的菜谱（`is_deleted=1`） | P0 |
@@ -118,6 +118,7 @@
 | FR-R07 | 向量同步 | 菜谱创建/更新时自动同步到 Chroma 向量库，支持全量重建与断点续传 | P0 |
 | FR-R08 | 营养信息与份量估算 | 菜谱详情展示按份估算的热量/蛋白质/脂肪/碳水；用量自由文本自动解析为克数 | P1 |
 | FR-R09 | 忌口/过敏提示 | 依据食材 `diet_tags` 与用户偏好，在菜谱详情与推荐中提示或过滤触碰忌口的菜谱 | P1 |
+| FR-R10 | 用户提交食材 | 创建菜谱的食材清单头部提供「找不到想要的食材？点我手动添加」入口，跳转创建食材页提交新食材（名称必填、分类/图片选填）；普通用户提交进入 `pending`，管理员审核通过后出现在所有用户的食材下拉中 | P2 |
 
 **验收标准**：
 - 列表接口支持 ≥4 维度联合筛选，响应时间 < 300ms
@@ -173,7 +174,7 @@
 | FR-U05 | 浏览历史 | 自动记录菜谱/套餐浏览历史，支持列表查看 | P1 |
 | FR-U06 | AI 对话历史 | 查看历史会话与消息内容，支持删除与"继续对话" | P1 |
 | FR-U07 | 我的菜谱 | 展示我创建的菜谱（含 pending/rejected 状态与驳回意见），支持编辑/删除/重新提交 | P1 |
-| FR-U08 | 我的套餐 | 展示我创建的套餐（含审核状态），支持编辑/删除 | P1 |
+| FR-U08 | 我的套餐 | 展示我创建的套餐（含 pending/rejected 状态与驳回意见），支持编辑/删除 | P1 |
 | FR-U09 | 饮食偏好设置 | 设置偏好菜系（cuisines）与忌口/过敏标签（diet_tags，JSON 持久化），用于过滤与推荐 | P1 |
 | FR-U10 | 菜谱合集（购物车） | 浏览菜谱时可收集进"菜谱合集"，持久化到 localStorage，一键基于合集生成套餐 | P2 |
 | FR-U11 | 待做清单 | 与收藏、菜谱合集语义独立的"近期要做"清单；菜谱卡片可一键加入，个人中心页集中查看/移除（localStorage 持久化） | P2 |
@@ -186,7 +187,7 @@
 | FR-I02 | 烹饪心得发布 | 用户发布烹饪心得（标题+正文+关联菜谱+图片），可设公开/私有 | P1 |
 | FR-I03 | 烹饪心得浏览 | 心得列表与详情页，公开心得自动同步到 RAG 向量库 | P1 |
 | FR-I04 | 套餐创建 | 用户从菜谱库选择多道菜组合成套餐，可设公开/私有 | P1 |
-| FR-I05 | 套餐浏览 | 套餐列表与详情，普通用户提交的套餐需审核后公开 | P1 |
+| FR-I05 | 套餐浏览 | 套餐列表与详情（广场卡片渲染套餐封面图），普通用户提交的套餐需审核后公开 | P1 |
 | FR-I06 | 套餐收藏 | 收藏他人公开套餐 | P2 |
 
 #### 2.3.3 后台管理模块（FR-ADMIN）
@@ -194,24 +195,25 @@
 | 编号 | 功能名称 | 功能描述 | 优先级 |
 |------|---------|---------|--------|
 | FR-ADM01 | 管理后台首页 | 展示待审核数量、用户数、菜谱数等统计指标 | P1 |
-| FR-ADM02 | 菜谱审核 | 审核用户提交的菜谱，通过/驳回（含驳回意见） | P0 |
-| FR-ADM03 | 套餐审核 | 审核用户提交的套餐 | P0 |
+| FR-ADM02 | 菜谱审核 | 审核用户提交的菜谱，通过/驳回（含驳回意见），亦可在菜谱详情页直接审核 | P0 |
+| FR-ADM03 | 套餐审核 | 审核用户提交的套餐，通过/驳回（含驳回意见），亦可在套餐详情页直接审核 | P0 |
+| FR-ADM08 | 食材审核 | 审核用户提交的食材（待审核/已通过/已驳回三态列表，支持名称搜索），通过后食材对所有人可见，驳回不公开；仪表盘含待审核食材统计卡片与快捷入口 | P1 |
 | FR-ADM04 | 菜谱管理 | 管理员可对菜谱进行增、删、改、查 | P0 |
 | FR-ADM05 | 用户管理 | 查看/禁用用户、调整角色 | P1 |
 | FR-ADM06 | 标签管理 | 标签的增删改查 | P1 |
-| FR-ADM07 | 食材管理 | 食材基础库的增删改查 | P1 |
+| FR-ADM07 | 食材管理 | 食材基础库的增删改查（含状态列显示；管理员创建直接通过） | P1 |
 
 ### 2.4 功能需求清单（汇总）
 
 | 模块 | P0 数量 | P1 数量 | P2 数量 | 小计 |
 |------|--------|--------|--------|------|
-| 菜谱服务 | 7 | 2 | 0 | 9 |
-| 用户中心 | 2 | 7 | 1 | 10 |
+| 菜谱服务 | 7 | 2 | 1 | 10 |
+| 用户中心 | 2 | 7 | 2 | 11 |
 | 互动模块 | 0 | 5 | 1 | 6 |
 | 智能推荐 | 4 | 0 | 0 | 4 |
 | AI 烹饪助手 | 7 | 1 | 0 | 8 |
-| 后台管理 | 3 | 4 | 0 | 7 |
-| **合计** | **23** | **19** | **2** | **44** |
+| 后台管理 | 3 | 5 | 0 | 8 |
+| **合计** | **23** | **20** | **4** | **47** |
 
 ---
 
@@ -339,10 +341,11 @@
                         │  普通用户    │
                         └──────┬──────┘
                                │
-   ┌───────────┬───────────────┼───────────────┬───────────┐
-   ▼           ▼               ▼               ▼           ▼
- 注册/登录   收藏菜谱        创建菜谱        AI多轮对话   发布心得
- 修改资料   查看历史        创建套餐        食材替代问答  发表点评
+   ┌───────────┬───────────────┬───────────────┬───────────┬───────────┐
+   ▼           ▼               ▼               ▼           ▼           ▼
+ 注册/登录   收藏菜谱        创建菜谱        AI多轮对话   发布心得    提交食材
+ 修改资料   查看历史        创建套餐        食材替代问答  发表点评   （待审核）
+ 我的菜谱                   手动添加食材     收藏套餐
 
                         ┌─────────────┐
                         │   管理员    │
@@ -351,7 +354,8 @@
                 ┌──────────────┼──────────────┐
                 ▼              ▼              ▼
             菜谱审核       套餐审核        用户管理
-            标签管理       食材管理        后台统计
+            食材审核       标签管理        后台统计
+                          食材管理
 ```
 
 ### 4.3 关键用例描述
@@ -374,7 +378,7 @@
 | **用例 ID** | UC-02 |
 | **参与者** | 普通用户 |
 | **前置条件** | 用户已登录 |
-| **主流程** | 1. 用户打开 AI 助手对话框<br>2. 输入问题（如"鸡蛋怎么打发更稳定？"）<br>3. 前端调用 `POST /api/ai/chat`，SSE 接收流式回复<br>4. 后端从 DB 加载会话历史到内存，保存用户消息<br>5. 通过 RAG 检索相关菜谱/心得作为上下文<br>6. LLM 流式生成回答，逐 chunk 推送<br>7. 流结束后保存 AI 回复到 `ai_messages` 表 |
+| **主流程** | 1. 用户打开 AI 助手对话框<br>2. 输入问题（如"鸡蛋怎么打发更稳定？"）<br>3. 前端调用 `POST /api/ai/chat`，SSE 接收流式回复<br>4. 后端按需加载会话历史到内存（仅内存缓存未命中时），保存用户消息<br>5. 通过 RAG 检索相关菜谱/心得作为上下文（召回→去重→热门补齐→Rerank 精排融合→忌口/预算约束）<br>6. LLM 流式生成回答，逐 chunk 推送<br>7. 流结束后保存 AI 回复到 `ai_messages` 表 |
 | **后置条件** | 对话完整显示；可在"AI 对话历史"页面查看 |
 
 #### UC-03：用户创建并提交菜谱
@@ -384,7 +388,7 @@
 | **用例 ID** | UC-03 |
 | **参与者** | 普通用户 |
 | **前置条件** | 用户已登录 |
-| **主流程** | 1. 用户点击"创建菜谱"<br>2. 填写标题、描述、封面、难度、烹饪时间、份量、预算<br>3. 选择/新建标签，添加食材与用量，添加烹饪步骤<br>4. 提交后调用 `POST /api/recipes`<br>5. 后端设置 `status=pending`，写入主表与关联表<br>6. 响应返回后由后台任务同步到 Chroma向量库（仅 approved 入库，失败仅记日志）<br>7. 等待管理员审核通过后公开可见 |
+| **主流程** | 1. 用户点击"创建菜谱"<br>2. 填写标题、描述、封面、难度、烹饪时间、份量、预算<br>3. 选择/新建标签，添加食材与用量（下拉中找不到目标食材时，可点食材清单头部的「点我手动添加」跳转创建食材页，见 UC-05），添加烹饪步骤<br>4. 提交后调用 `POST /api/recipes`<br>5. 后端设置 `status=pending`，写入主表与关联表<br>6. 响应返回后由后台任务同步到 Chroma向量库（仅 approved 入库，失败仅记日志）<br>7. 等待管理员审核通过后公开可见 |
 | **后置条件** | 菜谱在"我的菜谱"中可见（pending 状态）；管理员审核通过后公众可见 |
 
 #### UC-04：管理员审核菜谱
@@ -394,8 +398,19 @@
 | **用例 ID** | UC-04 |
 | **参与者** | 管理员 |
 | **前置条件** | 管理员已登录后台 |
-| **主流程** | 1. 管理员进入"菜谱审核"页面<br>2. 查看待审核菜谱列表（`status=pending`）<br>3. 点开详情查看内容<br>4. 点击"通过"或"驳回"（填写驳回意见）<br>5. 后端更新 `status`、`reviewer_id`、`review_comment`、`reviewed_at` |
+| **主流程** | 1. 管理员进入"菜谱审核"页面<br>2. 查看待审核菜谱列表（`status=pending`）<br>3. 点开详情查看内容，可直接在详情页或返回审核列表执行审核<br>4. 点击"通过"或"驳回"（驳回必须填写驳回意见）<br>5. 后端更新 `status`、`reviewer_id`、`review_comment`、`reviewed_at` |
 | **后置条件** | 通过的菜谱对公众可见；驳回的菜谱作者可在"我的菜谱"看到驳回意见并修改重新提交 |
+
+#### UC-05：用户提交新食材
+
+| 字段 | 内容 |
+|------|------|
+| **用例 ID** | UC-05 |
+| **参与者** | 普通用户 |
+| **前置条件** | 用户已登录，处于创建/编辑菜谱页 |
+| **主流程** | 1. 用户在食材清单下拉中找不到目标食材<br>2. 点击食材清单头部的「找不到想要的食材？点我手动添加」链接<br>3. 跳转到创建食材页（`/ingredients/create`），填写食材名称（必填）、分类与图片URL（选填）<br>4. 提交调用 `POST /api/admin/ingredients`<br>5. 后端按角色设置状态：管理员直接 `approved`，普通用户 `pending` 并记录 `submitted_by`<br>6. 提示"提交成功，等待管理员审核"并返回创建菜谱页 |
+| **备选流程** | - 未登录 → 路由守卫重定向到登录页<br>- 食材名已存在 → 后端返回 400，前端提示"食材已存在" |
+| **后置条件** | 食材进入待审核状态，不出现在公开食材下拉；管理员在「食材审核」页通过后对所有用户可见 |
 
 ---
 
@@ -594,9 +609,10 @@
 | 菜谱编辑 | `/recipes/:id/edit` | 作者 | 复用创建表单 |
 | 心得列表 | `/cooking-notes` | 公开 | 卡片列表 |
 | 心得详情 | `/cooking-notes/:id` | 公开 | Markdown 渲染 + 关联菜谱 |
-| 套餐列表 | `/meal-plans` | 公开 | 卡片列表 |
+| 套餐列表 | `/meal-plans` | 公开 | 卡片列表（渲染套餐封面图，无图回退图标占位） |
 | 套餐详情 | `/meal-plans/:id` | 公开 | 套餐信息 + 包含菜品列表 |
 | 套餐创建 | `/meal-plans/create` | 登录用户 | 选择菜品 + 套餐信息 |
+| 创建食材 | `/ingredients/create` | 登录用户 | 提交新食材（待管理员审核，入口在创建菜谱的食材清单头部） |
 | 登录 | `/login` | 公开 | 用户名/邮箱 + 密码 |
 | 注册 | `/register` | 公开 | 用户名 + 邮箱 + 密码 |
 | 个人资料 | `/user/profile` | 登录用户 | 修改昵称/头像/邮箱 |
@@ -611,7 +627,8 @@
 | 套餐审核 | `/admin/meal-plan-audit` | 管理员 | 待审核列表 + 审核操作 |
 | 用户管理 | `/admin/users` | 管理员 | 用户列表 + 状态/角色操作 |
 | 标签管理 | `/admin/tags` | 管理员 | 标签 CRUD |
-| 食材管理 | `/admin/ingredients` | 管理员 | 食材 CRUD |
+| 食材管理 | `/admin/ingredients` | 管理员 | 食材 CRUD（含状态列） |
+| 食材审核 | `/admin/ingredient-audit` | 管理员 | 待审核食材列表 + 通过/驳回操作 |
 
 ### 6.3 关键组件
 
@@ -667,16 +684,16 @@
 |------|------|------|---------|
 | 1 | `users` | 用户表 | id, username, email, password_hash, role(user/admin), is_active, preferences(JSON: cuisines/diet_tags/free_text) |
 | 2 | `tags` | 标签表 | id, name, type |
-| 3 | `recipes` | 菜谱主表 | id, title, description, cover_image_url, difficulty, cooking_time, servings, estimated_cost, author_id, status(draft/pending/approved/rejected), reviewer_id, view_count, favorite_count, is_deleted |
+| 3 | `recipes` | 菜谱主表 | id, title, description, cover_image_url, difficulty, cooking_time, servings, estimated_cost, author_id, status(draft/pending/approved/rejected), reviewer_id, review_comment(驳回原因), reviewed_at, view_count, favorite_count, is_deleted |
 | 4 | `recipe_tags` | 菜谱-标签关联 | recipe_id, tag_id（联合主键） |
-| 5 | `ingredients` | 食材基础表 | id, name, category, image_url, nutrition(JSON: kcal/protein/fat/carbs), diet_tags(JSON: seafood/nuts/dairy/egg/gluten/mushroom/soy/allium/spicy/meat/veg) |
+| 5 | `ingredients` | 食材基础表 | id, name, category, image_url, status(approved/pending/rejected，用户提交的进入审核), submitted_by(提交人ID), nutrition(JSON: kcal/protein/fat/carbs), diet_tags(JSON: seafood/nuts/dairy/egg/gluten/mushroom/soy/allium/spicy/meat/veg) |
 | 6 | `recipe_ingredients` | 菜谱-食材关联 | id, recipe_id, ingredient_id, quantity, note, sort_order |
 | 7 | `recipe_steps` | 菜谱步骤表 | id, recipe_id, step_number, instruction, duration |
 | 8 | `user_favorites` | 用户收藏表 | id, user_id, favorite_type(recipe/meal_plan), favorite_id |
 | 9 | `user_browse_history` | 浏览历史 | id, user_id, recipe_id, meal_plan_id, viewed_at |
 | 10 | `recipe_reviews` | 菜谱点评 | id, recipe_id, user_id, rating(1-5), content, is_deleted |
 | 11 | `cooking_notes` | 烹饪心得 | id, user_id, title, content, related_recipe_id, images(JSON), is_public, view_count |
-| 12 | `meal_plans` | 套餐主表 | id, user_id, title, description, cover_image_url, is_public, status, favorite_count |
+| 12 | `meal_plans` | 套餐主表 | id, user_id, title, description, cover_image_url, is_public, status(draft/pending/approved/rejected), reviewer_id, review_comment(驳回原因), reviewed_at, favorite_count, view_count, is_deleted |
 | 13 | `meal_plan_items` | 套餐明细 | id, meal_plan_id, recipe_id, sort_order, note |
 | 14 | `ai_conversations` | AI 会话 | id, user_id, title, created_at |
 | 15 | `ai_messages` | AI 消息 | id, conversation_id, role(user/assistant/system), content, tokens |
@@ -818,14 +835,14 @@
 |------|------|---------|
 | 认证 | `/api/auth` | POST /register, POST /login, GET /me |
 | 菜谱 | `/api/recipes` | GET /, GET /hot, GET /{id}, POST /, PUT /{id}, DELETE /{id} |
-| 用户中心 | `/api/users` | GET /profile, PUT /profile, GET /favorites, GET /history |
-| 点评 | `/api/reviews` | GET /recipe/{id}, POST /, DELETE /{id} |
-| 烹饪心得 | `/api/cooking-notes` | GET /, GET /{id}, POST /, PUT /{id}, DELETE /{id} |
-| 套餐 | `/api/meal-plans` | GET /, GET /{id}, POST /, PUT /{id}, DELETE /{id} |
+| 用户中心 | `/api/users` | GET/PUT /preferences, PUT /profile, PUT /password, GET/POST /favorites, DELETE /favorites/{id}, DELETE /favorites/by/{type}/{id}, POST/GET /history, GET /conversations, GET /conversations/{id} |
+| 点评 | `/api/reviews` | GET /recipes/{id}, POST /recipes/{id}, DELETE /{id} |
+| 烹饪心得 | `/api/cooking-notes` | GET /, GET /{id}, POST /, PUT /{id}, DELETE /{id}, GET/POST /{id}/comments, DELETE /comments/{id} |
+| 套餐 | `/api/meal-plans` | GET /, GET /{id}, GET /{id}/shopping-list, POST /, PUT /{id}, DELETE /{id} |
 | 统计 | `/api/stats` | GET /（首页菜谱/套餐/用户总量 + 近 7 天新增） |
-| AI 助手 | `/api/ai` | POST /chat (SSE), GET /conversations, DELETE /conversations/{id} |
+| AI 助手 | `/api/ai` | POST /chat (SSE，按 IP 限流 20次/分钟), POST /conversations/{id}/rewind-edit, DELETE /conversations/{id}（会话列表/详情在 /api/users/conversations） |
 | 智能推荐 | `/api/recommendations` | GET /personalized, GET /meal-plans, GET /prompts, POST /query |
-| 后台管理 | `/api/admin` | GET /dashboard, POST /recipes/{id}/audit, POST /meal-plans/{id}/audit, GET /users, ... |
+| 后台管理 | `/api/admin` | GET /stats(含 pending_ingredients 待审核食材数), GET/POST/PUT/DELETE /tags(…), GET/POST/PUT/DELETE /ingredients(…)（GET 默认仅返回已审核食材供下拉使用；传 status 参数仅管理员可用，非管理员 403；POST 允许登录用户提交：管理员直接通过/普通用户待审核并记录 submitted_by）, POST /ingredients/{id}/audit, GET /recipes/pending, POST /recipes/{id}/audit, DELETE /recipes/{id}, GET /meal-plans/pending, POST /meal-plans/{id}/audit, DELETE /meal-plans/{id}, GET /users, POST /users/{id}/toggle-active, POST /users/{id}/role |
 | 健康检查 | `/api/health` | GET / |
 
 ---

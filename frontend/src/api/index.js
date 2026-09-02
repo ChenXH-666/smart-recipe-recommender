@@ -181,6 +181,7 @@ export const admin = {
   removeTag: (id) => api.delete(`/admin/tags/${id}`),
   ingredients: (params) => api.get('/admin/ingredients', { params }),
   createIngredient: (params) => api.post('/admin/ingredients', null, { params }),
+  auditIngredient: (id, data) => api.post(`/admin/ingredients/${id}/audit`, data),
   updateIngredient: (id, params) =>
     api.put(`/admin/ingredients/${id}`, null, { params }),
   removeIngredient: (id) => api.delete(`/admin/ingredients/${id}`),

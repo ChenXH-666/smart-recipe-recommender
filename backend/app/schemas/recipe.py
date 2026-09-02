@@ -171,6 +171,8 @@ class RecipeListItem(BaseModel):
     favorite_count: int
     status: Optional[str] = None
     tags: List[TagInfo] = []
+    # 审核意见（驳回原因）—— 驳回状态下作者可见；非作者仅能访问 approved 状态，无泄露风险
+    review_comment: Optional[str] = None
     created_at: datetime
 
     class Config:
@@ -193,6 +195,8 @@ class RecipeDetail(BaseModel):
     status: str
     view_count: int
     favorite_count: int
+    # 审核意见（驳回原因）—— pending/rejected 仅作者/管理员可访问详情，无泄露风险
+    review_comment: Optional[str] = None
     tags: List[TagInfo] = []
     ingredients: List[RecipeIngredientOut] = []
     steps: List[StepInfo] = []

@@ -29,7 +29,11 @@
         class="plan-card"
         @click="$router.push(`/meal-plans/${plan.id}`)"
       >
-        <div class="card-icon">
+        <!-- 有封面图的套餐直接渲染图片，提升广场吸引力；无图/加载失败回退到图标占位 -->
+        <div v-if="plan.cover_image_url" class="card-cover">
+          <img :src="plan.cover_image_url" :alt="plan.title" loading="lazy" :onerror="fallbackImg" />
+        </div>
+        <div v-else class="card-icon">
           <el-icon :size="28"><Menu /></el-icon>
         </div>
         <div class="card-body">
@@ -79,6 +83,8 @@ const total = ref(0)
 const page = ref(1)
 const pageSize = 12
 const loading = ref(false)
+// 封面图加载失败时的灰色占位图（与「我的菜谱」卡片一致的兜底策略）
+const fallbackImg = "this.src='data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect width=%22100%22 height=%22100%22 fill=%22%23f3f4f6%22/></svg>'"
 
 async function load() {
   loading.value = true
@@ -158,9 +164,28 @@ onMounted(load)
   border-color: #bfdbfe;
 }
 
+.card-cover {
+  width: 100%;
+  height: 150px;
+  overflow: hidden;
+  background: #f3f4f6;
+}
+
+.card-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  transition: transform 0.3s;
+}
+
+.plan-card:hover .card-cover img {
+  transform: scale(1.05);
+}
+
 .card-icon {
   width: 100%;
-  height: 120px;
+  height: 150px;
   background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%);
   color: #2563eb;
   display: flex;

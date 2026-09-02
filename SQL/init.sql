@@ -99,6 +99,8 @@ CREATE TABLE ingredients (
     name VARCHAR(100) NOT NULL UNIQUE,
     category VARCHAR(50),
     image_url VARCHAR(500),
+    status VARCHAR(20) NOT NULL DEFAULT 'approved' COMMENT '审核状态：approved/pending/rejected（普通用户提交的进入 pending）',
+    submitted_by INT NULL COMMENT '提交人用户ID（普通用户提交时记录，管理员创建为 NULL）',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     food_group VARCHAR(50) COMMENT '食物组（用于营养平均值兜底）',
     nutrition JSON COMMENT '每100g估算营养 {kcal, protein, fat, carbs}',

@@ -109,6 +109,13 @@
         <div class="section-header">
           <el-icon><KnifeFork /></el-icon>
           <h3>食材清单</h3>
+          <!-- 下拉里找不到目标食材时，引导用户跳转提交新食材（提交后需管理员审核） -->
+          <span class="ingredient-add-tip">
+            找不到想要的食材？
+            <el-link type="primary" :underline="false" @click="$router.push('/ingredients/create?from=recipe-create')">
+              点我手动添加
+            </el-link>
+          </span>
         </div>
       </template>
       <div v-for="(ing, index) in form.ingredients" :key="index" class="dynamic-row">
@@ -405,6 +412,18 @@ onMounted(() => {
   font-size: 16px;
   font-weight: 600;
   margin: 0;
+}
+
+/* 食材清单头部的「手动添加食材」引导链接，靠右展示 */
+.ingredient-add-tip {
+  margin-left: auto;
+  font-size: 13px;
+  color: #909399;
+}
+
+.ingredient-add-tip .el-link {
+  font-size: 13px;
+  vertical-align: baseline;
 }
 
 .dynamic-row {

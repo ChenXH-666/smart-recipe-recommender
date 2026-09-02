@@ -126,6 +126,8 @@ class MealPlanListOut(BaseModel):
     favorite_count: int
     view_count: int
     author_nickname: Optional[str] = None
+    # 审核意见（驳回原因）—— 驳回状态下仅作者本人（mine 查询）可见
+    review_comment: Optional[str] = None
     created_at: datetime
 
     class Config:
@@ -143,6 +145,8 @@ class MealPlanDetailOut(BaseModel):
     favorite_count: int
     view_count: int
     author_nickname: Optional[str] = None
+    # 审核意见（驳回原因）—— pending/rejected 仅作者/管理员可访问详情，无泄露风险
+    review_comment: Optional[str] = None
     items: List[MealPlanItemOut] = []
     created_at: datetime
     updated_at: datetime

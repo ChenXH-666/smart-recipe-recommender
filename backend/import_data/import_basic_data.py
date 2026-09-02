@@ -62,10 +62,18 @@ def import_tags(db: Session, tags_file: Path) -> int:
 
 
 def import_ingredients(db: Session, ingredients_file: Path) -> int:
-    """从文件导入食材（JSON格式）"""
+    """从文件导入食材（JSON格式）
+
+    导入的食材归属官方账号（admin/官方小厨），status 走模型默认 approved；
+    submitted_by 记录官方账号 ID，与"平台预置食材归官方小厨"的现有数据一致。
+    """
     if not ingredients_file.exists():
         print(f"警告：食材文件不存在: {ingredients_file}")
         return 0
+
+    # 查询官方账号（可能尚未创建时为 None，此时 submitted_by 留空）
+    official = db.query(User).filter(User.username == "admin").first()
+    official_id = official.id if official else None
 
     count = 0
     with open(ingredients_file, "r", encoding="utf-8") as f:
@@ -89,7 +97,7 @@ def import_ingredients(db: Session, ingredients_file: Path) -> int:
                     continue
 
                 # 创建食材
-                ingredient = Ingredient(name=ingr_name, category=ingr_category)
+                ingredient = Ingredient(name=ingr_name, category=ingr_category, submitted_by=official_id)
                 db.add(ingredient)
                 count += 1
             except Exception as e:

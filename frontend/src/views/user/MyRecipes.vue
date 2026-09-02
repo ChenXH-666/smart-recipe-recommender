@@ -28,6 +28,9 @@
             </span>
           </div>
           <p class="desc">{{ r.description || '暂无描述' }}</p>
+          <p v-if="r.status === 'rejected' && r.review_comment" class="reject-reason">
+            <el-icon><WarningFilled /></el-icon>驳回原因：{{ r.review_comment }}
+          </p>
           <div class="meta">
             <span v-if="r.cooking_time"><el-icon><Timer /></el-icon>约 {{ r.cooking_time }} 分钟</span>
             <span><el-icon><View /></el-icon>{{ r.view_count }}</span>
@@ -182,6 +185,19 @@ load()
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+/* 驳回原因（已驳回的菜谱展示） */
+.reject-reason {
+  color: #dc2626;
+  font-size: 12px;
+  margin: 0 0 6px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .meta { display: flex; gap: 16px; color: #909399; font-size: 12px; align-items: center; }
 .meta .el-icon { margin-right: 2px; vertical-align: -2px; }

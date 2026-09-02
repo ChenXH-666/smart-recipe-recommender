@@ -65,6 +65,7 @@ def _enrich_recipe_list_item(recipe: Recipe) -> RecipeListItem:
         view_count=recipe.view_count,
         favorite_count=recipe.favorite_count,
         status=recipe.status,
+        review_comment=recipe.review_comment,
         tags=tag_infos,
         created_at=recipe.created_at,
     )
@@ -99,6 +100,7 @@ def _enrich_recipe_detail(recipe: Recipe, restrictions=None) -> RecipeDetail:
         status=recipe.status,
         view_count=recipe.view_count,
         favorite_count=recipe.favorite_count,
+        review_comment=recipe.review_comment,
         tags=tag_infos,
         ingredients=recipe.ingredients,
         steps=recipe.steps,
@@ -493,6 +495,25 @@ def update_recipe(
     # 标签数量限制
     if data.tag_ids is not None and len(data.tag_ids) > 20:
         raise HTTPException(status_code=400, detail="标签数量不能超过 20 个")
+
+    # 校验 tag_ids 与 ingredient_id 是否存在（与 create 一致，避免外键约束触发 500 错误）
+    if data.tag_ids is not None:
+        valid_tag_ids = {t.id for t in db.query(Tag.id).filter(Tag.id.in_(data.tag_ids)).all()}
+        invalid_tag_ids = set(data.tag_ids) - valid_tag_ids
+        if invalid_tag_ids:
+            raise HTTPException(
+                status_code=400,
+                detail=f"标签 ID 不存在: {sorted(invalid_tag_ids)}",
+            )
+    if data.ingredients is not None:
+        ing_ids = [ing.ingredient_id for ing in data.ingredients]
+        valid_ing_ids = {i.id for i in db.query(Ingredient.id).filter(Ingredient.id.in_(ing_ids)).all()}
+        invalid_ing_ids = set(ing_ids) - valid_ing_ids
+        if invalid_ing_ids:
+            raise HTTPException(
+                status_code=400,
+                detail=f"食材 ID 不存在: {sorted(invalid_ing_ids)}",
+            )
 
     # 更新基础字段
     update_data = data.model_dump(exclude_unset=True, exclude={"tag_ids", "ingredients", "steps", "status"})
