@@ -19,7 +19,7 @@ from app.models import (
     UserBrowseHistory, User,
 )
 from app.schemas.recipe import (
-    RecipeCreate, RecipeUpdate, RecipeDetail, RecipeListItem, RecipeSearchParams,
+    RecipeCreate, RecipeUpdate, RecipeDetail, RecipeListItem,
     RecipeIngredientCreate, StepCreate, TagInfo,
 )
 from app.schemas.common import PaginatedResponse, SuccessResponse

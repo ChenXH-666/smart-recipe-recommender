@@ -13,6 +13,8 @@ def _settings(**overrides):
         JWT_SECRET_KEY="a-strong-test-secret-at-least-32-chars-long!!",
         CORS_ALLOW_ORIGINS="*",
         RECIPE_COVER_WHITELIST="meishichina.com,xiachufang.com",
+        # API Key 显式置空：避免从 backend/ 目录运行时读到本地 .env 的真实 Key
+        LLM_API_KEY="", EMBEDDING_API_KEY="", RERANK_API_KEY="",
     )
     base.update(overrides)
     return Settings(**base)

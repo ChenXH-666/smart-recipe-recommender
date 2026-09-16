@@ -24,6 +24,12 @@
   RAG_EMBEDDING_BATCH_SIZE = 64 → 每次 Embedding API 最多同时编码 64 个文本块，避免单次请求过大或额度耗尽
   RAG_CHECKPOINT_FILE = "./chroma_db/rebuild_checkpoint.json" → 全量重建向量库时的断点文件，记录已成功的文档 ID
 
+【混合检索参数说明（Hybrid Search + RRF）】
+  RAG_HYBRID_SEARCH = True → 召回阶段双路并行：向量语义检索（BGE-M3）+ BM25 关键词检索，
+    各取 top_k 候选后用 RRF（Reciprocal Rank Fusion）融合排名；关闭则回退纯向量召回
+  RAG_HYBRID_RRF_K = 60 → RRF 平滑常数：score(d) = Σ 1/(k + rank_i(d))。
+    只依赖名次不依赖分数，规避双塔余弦相似度与 BM25 分数量纲不可比的问题
+
 【Rerank 精排参数说明（两阶段检索第二级）】
   RERANK_ENABLED = True   → 是否启用精排；关闭或调用失败时自动降级为纯召回排序
   RERANK_MODEL = "BAAI/bge-reranker-v2-m3" → SiliconFlow 提供的交叉编码精排模型，
@@ -142,6 +148,15 @@ class Settings(BaseSettings):
     RAG_CHAT_MAX_DISHES: int = 12            # 最终喂给模型的去重菜谱上限
     RAG_EMBEDDING_BATCH_SIZE: int = 64       # Embedding API 单次请求最大文本数
     RAG_CHECKPOINT_FILE: str = "./chroma_db/rebuild_checkpoint.json"  # 重建断点文件路径
+
+    # 混合检索（Hybrid Search）：向量召回 + BM25 关键词召回双路并行，RRF 排名融合
+    # 只替换 rag_search 的召回段（粗排），后续去重/精排/忌口/预算链路不变。
+    # 关键词通道基于 Chroma 全量分块的内存 BM25 索引（标题×3、标签×2 字段加权），
+    # 向量同步/删除/重建时自动失效重建；任一通道失败退化为单通道，主链路不受影响。
+    RAG_HYBRID_SEARCH: bool = True
+    # RRF 平滑常数 k：score(d) = Σ 1/(k + rank_i(d))，业界标准取 60，
+    # 控制名次衰减速度（k 越大名次差异越平缓）
+    RAG_HYBRID_RRF_K: int = 60
 
     # Rerank 精排（两阶段检索第二级：embedding 粗排召回 → cross-encoder 精排重排序）
     # 仅作用于对话候选池（build_recipe_pool_context），失败/超时自动降级为召回排序

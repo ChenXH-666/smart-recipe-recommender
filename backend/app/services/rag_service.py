@@ -1,18 +1,25 @@
 """
-RAG (Retrieval-Augmented Generation) 服务 —— 向量构建、语义检索、向量同步
+RAG (Retrieval-Augmented Generation) 服务 —— 向量构建、混合检索、向量同步
 
 ============================================================================
                       RAG 架构设计说明（面向答辩）
 ============================================================================
 
-本系统的 RAG 实现采用了经典的"向量数据库 + 语义检索 + LLM 增强"架构：
+本系统的 RAG 实现采用"混合召回 + 两阶段检索 + LLM 增强"架构：
 
 【整体流程】
-  用户提问 → Embedding 向量化 → Chroma 相似度检索（粗排召回）
-          → Rerank 交叉编码精排（按语义相关度重排候选池）
+  用户提问 → 混合召回（双路并行 + RRF 融合）
+          ├─ 向量通道：Embedding 向量化 → Chroma 余弦相似度检索（语义泛化）
+          └─ 关键词通道：BM25 评分检索（字面精确匹配，如菜名/食材整词命中）
+          → RRF 排名融合（score = Σ 1/(k + rank_i)，k=60）
+          → Rerank 交叉编码精排（α×精排分 + (1-α)×召回位置分融合）
           → 拼接上下文 → LLM 生成回答
 
-  即"两阶段检索"（Two-Stage Retrieval）架构：
+  即"两级检索"（Two-Stage Retrieval）架构：
+    - 第零级混合召回：向量双塔（BGE-M3）与 BM25 关键词两路并行——
+      前者擅长语义泛化（"下饭菜"≈米饭配菜），后者擅长字面精确
+      （"红烧肉"整词命中），RRF 只按名次融合、规避两路分数量纲
+      不可比的问题，互补补全召回盲区；
     - 第一级粗排：双塔 bi-encoder（BGE-M3 embedding），向量离线预建、毫秒级
       扫全库，负责"快而全"地捞出候选（召回率优先）；
     - 第二级精排：交叉编码 cross-encoder（bge-reranker-v2-m3），将查询与每条
@@ -30,7 +37,13 @@ RAG (Retrieval-Augmented Generation) 服务 —— 向量构建、语义检索�
      - 数据持久化到磁盘（chroma_db/ 目录），重启不丢失
      - 使用余弦相似度进行 top-K 检索 → 返回语义最相关的文档片段
 
-  3. 文档分块策略（Chunking）：
+  3. BM25 关键词通道（混合检索第二路）：
+     - 对 Chroma 全量分块构建内存 BM25 索引（标题×3、标签×2、正文×1 字段加权）
+     - 中文无分词器场景采用字符 bigram + 单字 token（"红烧肉"→红烧/烧肉/红/烧/肉）
+     - 高频字由 BM25 的 IDF 自动降权，无需人工停用词表
+     - 索引随向量同步/删除/重建自动失效重建（_invalidate_kw_index）
+
+  4. 文档分块策略（Chunking）：
      - 使用 RecursiveCharacterTextSplitter 递归分割
      - chunk_size=500：每块约 500 字符，含完整上下文但不过长
      - chunk_overlap=50：相邻块重叠 50 字符，防止关键信息被截断
@@ -53,6 +66,7 @@ RAG (Retrieval-Augmented Generation) 服务 —— 向量构建、语义检索�
 import os
 import re
 import json
+import math
 import logging
 import threading
 import requests
@@ -287,6 +301,8 @@ def remove_from_chroma(source_type: str, source_id: int):
         logger.info(f"已从向量库移除 {source_type} {source_id} 的全部分块")
     except Exception as e:
         logger.error(f"从向量库移除 {source_type} {source_id} 失败: {e}")
+    finally:
+        _invalidate_kw_index()
 
 
 def sync_recipe_to_chroma_by_id(recipe_id: int):
@@ -379,6 +395,9 @@ def sync_recipe_to_chroma(recipe):
         logger.info(f"已同步菜谱 {recipe.id} ({recipe.title}) 到向量库，共 {len(chunks)} 块")
     except Exception as e:
         logger.error(f"同步菜谱到向量库失败: {e}")
+    finally:
+        # 无论成功与否（delete 可能已执行），BM25 索引快照都可能过期
+        _invalidate_kw_index()
 
 
 def sync_cooking_note_to_chroma(note):
@@ -406,6 +425,275 @@ def sync_cooking_note_to_chroma(note):
         logger.info(f"已同步心得 {note.id} ({note.title}) 到向量库，共 {len(chunks)} 块")
     except Exception as e:
         logger.error(f"同步心得向量库失败: {e}")
+    finally:
+        _invalidate_kw_index()
+
+
+# ============================================================================
+# 混合检索（Hybrid Search）：BM25 关键词通道 + RRF 排名融合
+# ============================================================================
+
+# BM25 标准参数：k1 控制词频饱和（越大高频词增益越持久），b 控制文档长度归一化
+_BM25_K1 = 1.5
+_BM25_B = 0.75
+
+
+def _bm25_tokens(text: str) -> List[str]:
+    """
+    BM25 分词：ASCII 字母/数字串按整词（小写），中文按「单字 + 相邻二元组」。
+
+    中文没有空格分隔，无分词器场景下的经典做法是字符 bigram：
+      "红烧肉" → 红、红烧、烧、烧肉、肉
+    bigram 保证字面精确匹配（"红烧" 命中 "红烧排骨"），单字保留短查询
+    （单字查询"鱼"）与部分命中能力；高频字由 BM25 的 IDF 自动降权，
+    无需人工停用词表。查询与文档用同一分词函数，保证两端 token 对齐。
+    """
+    tokens: List[str] = []
+    buf = ""
+    for ch in text or "":
+        if ch.isascii() and ch.isalnum():
+            buf += ch.lower()
+        else:
+            if buf:
+                tokens.append(buf)
+                buf = ""
+            # 仅保留 CJK 基本区汉字，其余（标点/空白/emoji）一律丢弃
+            if "\u4e00" <= ch <= "\u9fff":
+                tokens.append(ch)
+    if buf:
+        tokens.append(buf)
+
+    out: List[str] = []
+    prev_single = ""
+    for t in tokens:
+        if len(t) == 1:
+            out.append(t)
+            if prev_single:
+                out.append(prev_single + t)  # 相邻单字组成 bigram
+            prev_single = t
+        else:
+            out.append(t)
+            prev_single = ""
+    return out
+
+
+# BM25 内存索引（全量分块），随向量库写操作自动失效重建
+_kw_index: Optional[Dict] = None
+_kw_index_lock = threading.Lock()
+
+
+def _invalidate_kw_index():
+    """BM25 索引失效：任何向量库写操作（同步/删除/重建）后调用，下次查询时重建。"""
+    global _kw_index
+    with _kw_index_lock:
+        _kw_index = None
+
+
+def _build_kw_index(vs) -> Optional[Dict]:
+    """
+    扫描 Chroma 全量分块，构建内存 BM25 倒排索引。
+
+    索引文本 = 标题×3 + 标签×2 + 分块正文 —— 字段加权让标题命中（菜名精确
+    匹配的核心信号）获得最高词频、标签次之、正文完整参与以覆盖食材/步骤词。
+
+    返回结构：
+      terms:    {词项: [(doc_idx, tf), ...]} 倒排表
+      doc_len:  各文档 token 数（BM25 长度归一化用）
+      avgdl:    平均文档长度
+      docs/metas: 分块正文与元数据快照
+    """
+    raw = vs._collection.get(include=["documents", "metadatas"])
+    docs = raw.get("documents") or []
+    metas = raw.get("metadatas") or []
+    terms: Dict[str, List[tuple]] = {}
+    doc_len: List[int] = []
+    for idx, doc in enumerate(docs):
+        meta = metas[idx] or {}
+        text = (
+            str(meta.get("title") or "") * 3
+            + str(meta.get("tags") or "") * 2
+            + (doc or "")
+        )
+        toks = _bm25_tokens(text)
+        doc_len.append(len(toks))
+        tf: Dict[str, int] = {}
+        for t in toks:
+            tf[t] = tf.get(t, 0) + 1
+        for t, c in tf.items():
+            terms.setdefault(t, []).append((idx, c))
+    avgdl = (sum(doc_len) / len(doc_len)) if doc_len else 0.0
+    logger.info(
+        f"BM25 关键词索引构建完成：{len(docs)} 个分块、{len(terms)} 个词项"
+    )
+    return {
+        "terms": terms,
+        "doc_len": doc_len,
+        "avgdl": avgdl,
+        "docs": docs,
+        "metas": metas,
+    }
+
+
+def _get_kw_index(vs) -> Optional[Dict]:
+    """获取 BM25 索引（懒加载 + 双重检查锁，与向量库单例同款并发保护）。"""
+    global _kw_index
+    if _kw_index is None:
+        with _kw_index_lock:
+            if _kw_index is None:
+                _kw_index = _build_kw_index(vs)
+    return _kw_index
+
+
+def _bm25_keyword_search(
+    vs, query: str, top_k: int, filter_source_type: Optional[str]
+) -> List[Dict]:
+    """
+    关键词通道：BM25 评分排序返回 top_k 个分块（返回结构与 rag_search 一致）。
+
+    IDF 基于全库统计（含心得分块，词项稀有度评估更准）；评分阶段按
+    filter_source_type 过滤候选，与向量通道的 filter 语义保持一致。
+    """
+    index = _get_kw_index(vs)
+    if not index or not index["docs"]:
+        return []
+
+    q_terms = set(_bm25_tokens(query))
+    if not q_terms:
+        return []
+
+    terms = index["terms"]
+    doc_len = index["doc_len"]
+    metas = index["metas"]
+    n_docs = len(doc_len)
+    avgdl = index["avgdl"] or 1.0
+
+    scores: Dict[int, float] = {}
+    for term in q_terms:
+        postings = terms.get(term)
+        if not postings:
+            continue
+        df = len(postings)
+        idf = math.log(1.0 + (n_docs - df + 0.5) / (df + 0.5))
+        for doc_idx, tf in postings:
+            if filter_source_type:
+                meta = metas[doc_idx] or {}
+                if meta.get("source_type") != filter_source_type:
+                    continue
+            denom = tf + _BM25_K1 * (1.0 - _BM25_B + _BM25_B * doc_len[doc_idx] / avgdl)
+            scores[doc_idx] = scores.get(doc_idx, 0.0) + idf * tf * (_BM25_K1 + 1.0) / denom
+
+    if not scores:
+        return []
+    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)[:top_k]
+    return [
+        {
+            "content": index["docs"][doc_idx],
+            "source_type": (index["metas"][doc_idx] or {}).get("source_type", ""),
+            "source_id": (index["metas"][doc_idx] or {}).get("source_id", 0),
+            "title": (index["metas"][doc_idx] or {}).get("title", ""),
+            "tags": (index["metas"][doc_idx] or {}).get("tags", ""),
+        }
+        for doc_idx, _ in ranked
+    ]
+
+
+def _rrf_fuse(rank_lists: List[List[str]], k: int) -> List[str]:
+    """
+    Reciprocal Rank Fusion：把多路有序列表融合成一个排序列表。
+
+      RRF(d) = Σ  1 / (k + rank_i(d))
+      其中 rank_i(d) 是文档 d 在第 i 路列表中的名次（从 1 开始），k 为平滑常数。
+
+    只依赖名次不依赖分数 —— 双塔余弦相似度（-1~1）与 BM25 分（无界）
+    量纲不可比，RRF 规避了分数归一化问题，是混合检索的标准融合方法
+    （业界 k 通常取 60）。未在任一路出现的文档不参与融合。
+    """
+    scores: Dict[str, float] = {}
+    for ranked in rank_lists:
+        for rank, key in enumerate(ranked, 1):
+            scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank)
+    return sorted(scores, key=lambda x: scores[x], reverse=True)
+
+
+def _chunk_key(content: str, source_id, source_type: str) -> str:
+    """分块融合键：source_type + source_id + 正文（三要素唯一定位一个分块）"""
+    return f"{source_type}#{source_id}#{content}"
+
+
+def _hybrid_search(
+    vs, query: str, top_k: int, filter_source_type: Optional[str]
+) -> List[Dict]:
+    """
+    混合检索主流程：向量语义召回 + BM25 关键词召回 → RRF 排名融合。
+
+    双通道互补：
+      - 向量通道（BGE-M3）擅长语义泛化（"下饭菜" ≈ 好吃的米饭配菜）；
+      - 关键词通道（BM25）擅长字面精确（菜名"红烧肉"、食材"排骨"整词命中），
+        补回语义检索对专名/精确字面查询的召回盲区。
+
+    两路各取 top_k，RRF（k=RAG_HYBRID_RRF_K）融合后截断 top_k。
+    任一通道失败仅退化为另一通道的排序，不抛异常、不中断主链路。
+    """
+    search_filter = {"source_type": filter_source_type} if filter_source_type else None
+
+    # ① 向量通道（沿用 Chroma 余弦相似度检索）
+    v_docs = []
+    try:
+        v_docs = vs.similarity_search(query, k=top_k, filter=search_filter)
+    except Exception as e:
+        logger.error(f"混合检索-向量通道失败（本轮仅用关键词通道）: {e}")
+
+    # ② 关键词通道（BM25 内存索引）
+    kw_results = []
+    try:
+        kw_results = _bm25_keyword_search(vs, query, top_k, filter_source_type)
+    except Exception as e:
+        logger.error(f"混合检索-关键词通道失败（本轮仅用向量通道）: {e}")
+
+    if not v_docs and not kw_results:
+        return []
+
+    vector_list = [
+        _chunk_key(
+            d.page_content,
+            (d.metadata or {}).get("source_id", 0),
+            (d.metadata or {}).get("source_type", ""),
+        )
+        for d in v_docs
+    ]
+    keyword_list = [
+        _chunk_key(r["content"], r["source_id"], r["source_type"]) for r in kw_results
+    ]
+    fused = _rrf_fuse([vector_list, keyword_list], k=settings.RAG_HYBRID_RRF_K)[:top_k]
+
+    # 融合结果回填：同键优先用向量通道的 Document（保证与 Chroma 实时状态一致），
+    # 仅关键词通道命中的分块用 BM25 索引快照。
+    v_map = {
+        _chunk_key(
+            d.page_content,
+            (d.metadata or {}).get("source_id", 0),
+            (d.metadata or {}).get("source_type", ""),
+        ): d
+        for d in v_docs
+    }
+    kw_map = {
+        _chunk_key(r["content"], r["source_id"], r["source_type"]): r for r in kw_results
+    }
+
+    results = []
+    for key in fused:
+        if key in v_map:
+            meta = v_map[key].metadata or {}
+            results.append({
+                "content": v_map[key].page_content,
+                "source_type": meta.get("source_type", ""),
+                "source_id": meta.get("source_id", 0),
+                "title": meta.get("title", ""),
+                "tags": meta.get("tags", ""),
+            })
+        else:
+            results.append(kw_map[key])
+    return results
 
 
 def _keyword_match_score(query: str, content: str, title: str = "", tags: str = "") -> float:
@@ -526,26 +814,42 @@ def _fallback_metadata_search(
         return []
 
 
-def rag_search(query: str, top_k: int = None, filter_source_type: str = None) -> List[Dict]:
+def rag_search(query: str, top_k: int = None, filter_source_type: str = None,
+               hybrid: Optional[bool] = None) -> List[Dict]:
     """
-    RAG 语义检索核心函数（带降级容错）。
+    RAG 检索核心函数（混合召回 + 多级降级容错）。
 
-    【主流程】
-      1. 将用户查询文本通过 embedding 模型转换为向量
-      2. 在 Chroma 中执行余弦相似度搜索，返回 top_k 个最相关的文档块
-      3. 可选按 source_type 过滤（例如只检索菜谱或只检索心得）
+    【主流程】（RAG_HYBRID_SEARCH=true，默认）
+      1. 双路召回并行：向量语义检索（BGE-M3 + Chroma 余弦相似度）
+         与 BM25 关键词检索，各取 top_k 个候选分块
+      2. RRF 排名融合：score(d) = Σ 1/(k + rank_i(d))，只看名次不看分数，
+         规避两路分数量纲不可比问题；融合后截断 top_k
+      3. 可选按 source_type 过滤（两路通道过滤语义一致）
 
-    【容错降级】
-      - 若 embedding API 失败：退化为零向量 + 关键词评分重排序
-      - 若 Chroma similarity_search 本身抛异常：直接走 metadata + 关键词匹配
+    【降级链路】
+      - 任一通道失败：退化为单通道排序（不中断、不抛异常）
+      - 混合检索整体异常/关闭：回退纯向量检索（原链路）
+      - 纯向量也无结果：兜底 metadata + 关键词 n-gram 评分
       - 保证任何情况下都不会抛异常导致接口 500
 
+    hybrid 参数可显式覆盖配置（供评测对照实验使用）；缺省读 RAG_HYBRID_SEARCH。
     返回每个结果包含 content（文档内容）、source_type、source_id、title、tags。
     """
     if top_k is None:
         top_k = settings.RAG_TOP_K
 
     vs = get_vectorstore()
+
+    if hybrid is None:
+        hybrid = settings.RAG_HYBRID_SEARCH
+    if hybrid:
+        try:
+            results = _hybrid_search(vs, query, top_k, filter_source_type)
+            if results:
+                return results
+            # 双通道均无结果（空库/查询无有效 token）→ 继续走原链路兜底
+        except Exception as e:
+            logger.error(f"混合检索异常，退回纯向量链路: {e}")
 
     search_filter = None
     if filter_source_type:
@@ -1013,6 +1317,8 @@ def rebuild_vectorstore(db_session=None, resume: bool = True):
         vs._collection.delete(
             where={"source_type": {"$in": ["recipe", "cooking_note"]}}
         )
+        # 全库已清空，BM25 索引快照立即失效
+        _invalidate_kw_index()
 
     # 构建待编码文档列表
     pending_texts = []
@@ -1120,9 +1426,11 @@ def rebuild_vectorstore(db_session=None, resume: bool = True):
                 f"已记录 {len(done_ids)} 个成功文档块，下次 rebuild_vectorstore() "
                 f"传入 resume=True 可断点续传"
             )
+            _invalidate_kw_index()  # 中途终止：已写入的批次需让索引失效
             raise
 
     logger.info(f"向量库重建完成：本次共编码 {processed_in_run} 个文档块")
+    _invalidate_kw_index()  # 重建成功：索引按新库状态重建
 
     # 全部成功后清空 checkpoint
     if resume:

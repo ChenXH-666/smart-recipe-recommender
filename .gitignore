@@ -19,6 +19,7 @@ backend/.env-mimo
 backend/.env.*
 !backend/.env.example
 backend/config.local.py
+frontend/.env*
 
 # Python
 __pycache__/
@@ -85,9 +86,8 @@ backend/import_data/reset_all_passwords.py
 backup/
 SQL/backup*.*
 
-# 本地向量库（Chroma 持久化缓存）
-app/chroma_db/
-backend/chroma_db/
+# 本地向量库（Chroma 持久化缓存）—— 不限层级，避免从不同目录启动时漏防
+chroma_db/
 
 # 本地/临时数据
 data/
@@ -95,8 +95,8 @@ new_data/
 api_example/
 
 # 检索评测本地实验产物（依赖在线 API，机器相关）
-backend/import_data/eval_rerank_results.md
-backend/import_data/eval_rerank_results.json
+backend/import_data/eval_*_results.md
+backend/import_data/eval_*_results.json
 
 # ============================================================
 # 毕业设计文档 / 内部文档 —— 不应上传到公开仓库

@@ -20,11 +20,6 @@ class PaginatedResponse(BaseModel, Generic[T]):
     items: list[T]
 
 
-class ErrorResponse(BaseModel):
-    """通用错误响应"""
-    detail: str
-
-
 class SuccessResponse(BaseModel):
     """通用成功响应 —— 带可选 id 字段，创建/更新操作可返回新创建记录的 ID"""
     message: str = "操作成功"

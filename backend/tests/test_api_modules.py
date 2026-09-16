@@ -332,3 +332,52 @@ class TestIngredientSubmitAndAudit:
     def test_submit_requires_login(self, client):
         assert client.post("/api/admin/ingredients",
                            params={"name": "匿名食材"}).status_code == 401
+
+
+# ------------------------------- 安全机制 -------------------------------
+
+class TestSecurity:
+    """安全机制接口级验证：限流 429 / SQL 注入 / XSS 原样存储 / 越权。"""
+
+    def test_login_rate_limit_returns_429_and_retry_after(self, client):
+        """登录限流 10 次/60s：前 10 次正常处理，第 11 次触发 429 + Retry-After。"""
+        _register(client)
+        for _ in range(10):
+            r = client.post("/api/auth/login", json={
+                "username": "chef", "password": "wrong123"})
+            assert r.status_code == 401
+        limit = client.post("/api/auth/login", json={
+            "username": "chef", "password": "pass1234"})
+        assert limit.status_code == 429
+        assert "Retry-After" in limit.headers
+        assert "请求过于频繁" in limit.text
+
+    def test_register_rate_limit_returns_429(self, client):
+        """注册限流 5 次/60s：前 5 次成功，第 6 次触发 429。"""
+        for i in range(5):
+            r = client.post("/api/auth/register", json={
+                "username": f"rl{i}", "email": f"rl{i}@a.com", "password": "pass1234"})
+            assert r.status_code == 200, r.text
+        limit = client.post("/api/auth/register", json={
+            "username": "rl9", "email": "rl9@a.com", "password": "pass1234"})
+        assert limit.status_code == 429
+
+    def test_sqli_payload_returns_401_not_500(self, client):
+        """SQL 注入载荷被 ORM 参数化查询当作普通用户名处理，绝不返回 500。"""
+        _register(client)
+        r = client.post("/api/auth/login", json={
+            "username": "' OR '1'='1' --", "password": "' OR '1'='1"})
+        assert r.status_code == 401
+
+    def test_xss_review_content_stored_verbatim(self, client, db):
+        """XSS 载荷在服务端原样存储不转义；（前端渲染时经 DOMPurify 清洗）。"""
+        from app.models import RecipeReview
+        uid = _register(client)
+        token = _login(client)
+        rid = _approved_recipe(db, uid)
+        payload = {"rating": 4, "content": '<script>alert(1)</script>清淡好菜'}
+        create = client.post(f"/api/reviews/recipes/{rid}", json=payload,
+                             headers=_auth(token))
+        assert create.status_code == 200
+        row = db.query(RecipeReview).first()
+        assert row.content == payload["content"]
