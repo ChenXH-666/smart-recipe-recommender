@@ -14,11 +14,19 @@
   - 客户端与后端同机 localhost、单进程单 Worker、连接复用（keep-alive）
   - 测量期间不做其他重负载操作；推荐接口的延迟含一次外部 Embedding API 调用
 
+副作用（真实链路测量的固有写入，脚本只记录实测值、不做任何数据修饰）：
+  - 菜谱详情基准会触发浏览数 view_count +1（未登录访问，不写浏览历史）；
+    如需完全避免写库，加 --skip-detail 跳过该组
+  - AI 首包样本会在压测账号下新建会话并保存消息（每条样本 1 个会话 + 2 条消息）；
+    如需避免，加 --skip-ai
+  - 其余接口（菜谱列表/搜索/推荐/统计/并发）均为只读，不产生写入
+
 用法（先 conda activate food；后端须以 --port 8000 --proxy-headers 启动）：
-    需预先注册一个用于压测的普通账号，凭据通过参数或环境变量传入（脚本不内置默认账号）：
+    需预先注册一个用于压测的普通账号（或用已有账号），凭据通过参数或环境变量传入（脚本不内置默认账号）：
     cd backend
-    python import_data/bench_api.py --username bench_user --password '<密码>'   # 全量基准（含 AI 首包）
-    python import_data/bench_api.py --username bench_user --password '<密码>' --skip-ai  # 跳过 AI 首包（省额度）
+    python import_data/bench_api.py --username <账号> --password '<密码>'   # 全量基准（含 AI 首包）
+    python import_data/bench_api.py --username <账号> --password '<密码>' --skip-ai      # 跳过 AI 首包（省额度）
+    python import_data/bench_api.py --username <账号> --password '<密码>' --skip-detail  # 跳过详情基准（不写 view_count）
     # 也可用环境变量：BENCH_USERNAME / BENCH_PASSWORD
     python import_data/bench_api.py --serial-n 50    # 改串行样本数
     python import_data/bench_api.py --concurrency 10,20,50 --conc-total 200
@@ -131,7 +139,7 @@ def bench_serial(name: str, do_request, n: int, warmup: int = 5) -> dict:
 def run_serial_benchmarks(base_url: str, session: requests.Session, token: str,
                           recipe_ids: list, keyword: str, n: int,
                           username: str, password: str,
-                          cold_wait: int = None) -> dict:
+                          cold_wait: int = None, skip_detail: bool = False) -> dict:
     """串行基准主入口，返回 {"items": [...], "stats_cache": {...}}"""
     auth = {"Authorization": f"Bearer {token}"}
     items = []
@@ -145,15 +153,19 @@ def run_serial_benchmarks(base_url: str, session: requests.Session, token: str,
     ))
 
     # 详情接口轮换 10 个真实 ID；未登录访问（不计浏览历史，仅含 view_count 原子更新）
-    idx = {"i": 0}
+    # --skip-detail：跳过该组，完全避免写库（代价是报告里缺少详情接口一项）
+    if skip_detail:
+        print("  已跳过菜谱详情基准（--skip-detail，避免浏览数虚增）")
+    else:
+        idx = {"i": 0}
 
-    def _detail():
-        rid = recipe_ids[idx["i"] % len(recipe_ids)]
-        idx["i"] += 1
-        return session.get(f"{base_url}/api/recipes/{rid}")
+        def _detail():
+            rid = recipe_ids[idx["i"] % len(recipe_ids)]
+            idx["i"] += 1
+            return session.get(f"{base_url}/api/recipes/{rid}")
 
-    items.append(bench_serial(f"菜谱详情 GET /api/recipes/{{id}}（轮换 {len(recipe_ids)} 个 ID）",
-                              _detail, n))
+        items.append(bench_serial(f"菜谱详情 GET /api/recipes/{{id}}（轮换 {len(recipe_ids)} 个 ID）",
+                                  _detail, n))
 
     items.append(bench_serial(
         f"菜谱搜索 GET /api/recipes?keyword={keyword}",
@@ -452,6 +464,8 @@ def main():
                         help="压测账号密码，亦可用环境变量 BENCH_PASSWORD")
     parser.add_argument("--serial-n", type=int, default=DEFAULT_SERIAL_N, help="串行基准样本数")
     parser.add_argument("--skip-ai", action="store_true", help="跳过 AI 首包测试（省 LLM 额度）")
+    parser.add_argument("--skip-detail", action="store_true",
+                        help="跳过菜谱详情基准（该组会触发浏览数 view_count +1）")
     parser.add_argument("--ai-n", type=int, default=DEFAULT_AI_N, help="AI 首包样本数（真烧额度）")
     parser.add_argument("--concurrency", default=",".join(map(str, DEFAULT_CONCURRENCY)))
     parser.add_argument("--conc-total", type=int, default=200, help="每个并发级别的总请求数")
@@ -477,7 +491,7 @@ def main():
     cold_wait = None if args.no_cold_wait else DEFAULT_COLD_WAIT
     serial_result = run_serial_benchmarks(
         args.base_url, session, ctx["token"], ctx["recipe_ids"], ctx["keyword"],
-        args.serial_n, args.username, args.password, cold_wait,
+        args.serial_n, args.username, args.password, cold_wait, args.skip_detail,
     )
     # 若 XFF 未被采信，登录只统计限流窗口内的有效样本
     if not xff_ok:

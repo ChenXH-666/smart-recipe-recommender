@@ -166,9 +166,9 @@ python -m pytest tests -v --cov=app --cov-report=term-missing
 ```bash
 cd backend
 conda activate food
-# 需先注册一个用于压测的普通账号，凭据通过参数或环境变量 BENCH_USERNAME/BENCH_PASSWORD 传入
-python import_data/bench_api.py --username bench_user --password '<密码>'
-python import_data/bench_api.py --username bench_user --password '<密码>' --skip-ai   # 跳过 AI 首包（省 LLM 额度）
+# 需先注册一个用于压测的普通账号（或用已有账号），凭据通过参数或环境变量 BENCH_USERNAME/BENCH_PASSWORD 传入
+python import_data/bench_api.py --username <账号> --password <密码>
+python import_data/bench_api.py --username <账号> --password <密码> --skip-ai   # 跳过 AI 首包（省 LLM 额度）
 ```
 以真实 HTTP 请求测量已运行的后端（需后端已运行在 8000 端口，建议以 `--proxy-headers` 启动，否则登录接口"10 次/分钟/IP"的限流会使登录样本自动降为限流窗口内的 10 次）：核心接口串行延迟（N=100）、AI 对话首包延迟（SSE，默认 6 条）、并发承载（10/20/50）与首页统计缓存冷/热对比，结果同时输出 Markdown/JSON 报告（`import_data/bench_api_results.md/.json`，为论文 6.5 节性能测试数据来源）。
 
