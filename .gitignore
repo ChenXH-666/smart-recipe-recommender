@@ -98,6 +98,10 @@ api_example/
 backend/import_data/eval_*_results.md
 backend/import_data/eval_*_results.json
 
+# 接口性能基准本地实验产物（机器相关）
+backend/import_data/bench_*.md
+backend/import_data/bench_*.json
+
 # ============================================================
 # 毕业设计文档 / 内部文档 —— 不应上传到公开仓库
 # ============================================================
@@ -115,3 +119,5 @@ docs/
 # 调试/临时脚本（含硬编码测试凭据）
 screenshot_profile.py
 screenshot_*.png
+
+检索优化待办.md

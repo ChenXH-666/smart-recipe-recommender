@@ -227,10 +227,10 @@
 
 | 指标 | 目标值 | 测量方法 |
 |------|--------|---------|
-| 普通接口平均响应时间 | ≤ 300ms | 接口压测（wrk/ab） |
+| 普通接口平均响应时间 | ≤ 300ms | 接口压测（`import_data/bench_api.py`，真实 HTTP 串行/并发） |
 | 菜谱列表查询（10万级数据） | ≤ 500ms | 已建立 `idx_status`、`idx_estimated_cost`、`idx_created_at` 索引 |
 | 菜谱详情接口（含联表加载） | ≤ 300ms | 使用 `joinedload` 预加载避免 N+1 |
-| AI 流式首 token 响应 | ≤ 2s | SSE 连接建立到首个 chunk 到达 |
+| AI 流式首 token 响应 | ≤ 2s | SSE 连接建立到首个 chunk 到达；实测均值 2.60 s（最快 1.53 s），未达标，耗时主要在 LLM 服务端首 Token 排队与解码，详见论文 6.5 节 |
 | Embedding 单批次编码（64 条） | ≤ 5s | SiliconFlow API 实测 |
 | 向量检索 Top-5 | ≤ 200ms | Chroma 本地查询 |
 | Rerank 精排（单轮对话，约 20~30 候选对） | ≤ 1s | SiliconFlow API 实测；超时（默认 10s）自动降级为召回排序 |
@@ -253,6 +253,8 @@
 | 封面图懒加载 | 列表图片 `loading="lazy"`，视口内才请求 |
 | 静态资源长缓存 | 封面图响应 `Cache-Control: max-age=86400` |
 | 构建分包 | element-plus/图标/markdown 独立 chunk，业务主包 1244KB→87KB |
+
+**性能基准实测**（本机 localhost、uvicorn 单 Worker，脚本 `import_data/bench_api.py`，完整结果见论文 6.5 节）：非 AI 内容接口（菜谱列表/搜索/详情）平均响应 11.5~26.8 ms、P99 不超过 60 ms，满足 ≤300ms 目标；登录接口平均 190.6 ms（瓶颈为 bcrypt 慢哈希校验）；AI 对话首包平均 2.60 s、最快 1.53 s，耗时主要来自 LLM 服务端首 Token 排队与解码（据同类接口推算，本地检索与向量化合计约 0.4 s，未单独埋点实测），处于交互可接受区间，进一步改善依赖 LLM 服务侧或本地化部署；首页统计缓存命中平均 1.5 ms（冷启动 7.7 ms）；菜谱列表接口 10 并发下达 100.4 QPS 且错误率 0，50 并发时进入过载区（P95 1304 ms、错误率仍为 0），印证多 Worker 部署可进一步提升并发上限。
 
 ### 3.2 安全需求
 
