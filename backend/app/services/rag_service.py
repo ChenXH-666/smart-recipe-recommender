@@ -9,7 +9,7 @@ RAG (Retrieval-Augmented Generation) 服务 —— 向量构建、混合检索�
 
 【整体流程】
   用户提问 → 查询改写（可选：无实体词查询经 LLM 补全菜名/食材实体，与原查询双路召回 RRF 融合）
-          → 混合召回（双路并行 + RRF 融合）
+          → 混合召回（双路并行 + RRF 融合；含预算/人数约束的查询退化为纯向量，见下）
           ├─ 向量通道：Embedding 向量化 → Chroma 余弦相似度检索（语义泛化）
           └─ 关键词通道：BM25 评分检索（字面精确匹配，如菜名/食材整词命中）
           → RRF 排名融合（score = Σ 1/(k + rank_i)，k=60）
@@ -46,6 +46,9 @@ RAG (Retrieval-Augmented Generation) 服务 —— 向量构建、混合检索�
      - 中文无分词器场景采用字符 bigram + 单字 token（"红烧肉"→红烧/烧肉/红/烧/肉）
      - 高频字由 BM25 的 IDF 自动降权，无需人工停用词表
      - 索引随向量同步/删除/重建自动失效重建（_invalidate_kw_index）
+     - 约束类查询（预算/人数）跳过本通道：查询含"预算100元""三个人"等约束时，
+       检索信号在约束条件而非字面词项，BM25 只会对"东北""家常"等泛词大面积字面
+       命中、挤掉语义命中的确切菜谱（RAG_HYBRID_CONSTRAINT_SKIP_KEYWORD，默认开启）
 
   4. 文档分块策略（Chunking）：
      - 使用 RecursiveCharacterTextSplitter 递归分割
@@ -58,7 +61,8 @@ RAG (Retrieval-Augmented Generation) 服务 —— 向量构建、混合检索�
      - 触发判定：查询与全库菜名无 ≥3 字连续片段命中即视为"无实体词"
        （复用 BM25 索引构建时生成的菜名 n-gram 词表，零额外扫描开销）
      - 改写：LLM 将口语化需求补全为含具体菜名/食材的检索表达，保留预算等约束
-     - 校验：改写结果须含库内真实菜名（≥3 字命中，防幻觉菜名）且保留原数值约束
+     - 校验：改写结果须含库内真实菜名（≥3 字命中，防幻觉菜名）且保留原预算金额
+       （硬校验仅覆盖预算金额；人数等其余约束依赖提示词保留、未强制校验）
      - 融合：改写查询与原查询各自召回后经 RRF 排名融合（原查询能力始终保留）
      - 降级：未触发/调用失败/超时/校验不过 → 静默回退原查询，不影响主链路
 
@@ -947,6 +951,10 @@ def _validate_rewrite(rewritten: str, original: str) -> bool:
       ① 必须含库内真实菜名（≥3 字连续命中）—— 过滤 LLM 幻觉菜名；
       ② 原查询识别出的预算金额必须原样保留 —— 预算约束不丢失
          （只校验预算而非所有数字："30分钟""500g"等非约束数字允许改写丢掉）。
+
+    注：硬校验仅覆盖预算金额；人数等其余约束依赖提示词保留、不强制校验——
+    改写若丢弃人数，约束跳过判定（query_has_explicit_constraint）对该改写查询
+    不生效、该路继续双通道（改写含具体菜名时 BM25 为正贡献，无回退证据）。
     """
     if _max_title_match_len(rewritten, _get_title_ngrams()) < REWRITE_MIN_ENTITY_LEN:
         return False
@@ -1019,10 +1027,47 @@ def _merge_ranked_results(primary: List[Dict], secondary: List[Dict], top_k: int
     return [lookup[key] for key in fused]
 
 
+# 约束类查询判定：含明确预算金额（"预算100元""300块以内"）或用餐人数（"三个人""5人份"）
+# 的查询。这类查询的检索信号在约束条件本身而非字面词项——BM25 关键词通道只会对
+# "东北""家常"等泛类别词大面积字面命中，把同类无关菜推入前排、经 RRF 融合后挤掉
+# 向量通道语义命中的确切菜谱（评测：约束组 R@12 0.528→0.333 的回退即此成因）。
+# 故约束类查询跳过关键词通道、退化为纯向量召回（RAG_HYBRID_CONSTRAINT_SKIP_KEYWORD）。
+# 预算判定复用 _extract_budget 的严格正则（"5块排骨"等量词不误判、"30分钟"等时长不触发）。
+# 判定基于查询文本，对改写查询同样成立的前提是"改写文本仍含该约束"：预算金额在
+# _validate_rewrite 硬校验下必然保留、跳过必然生效；人数依赖提示词保留，若被改写
+# 丢弃则改写路径不跳过、继续双通道（含具体菜名时 BM25 为正贡献，无回退证据）。
+_SERVING_PATTERN = re.compile(
+    r"[一两二三四五六七八九十\d]+\s*个?\s*人\s*(?:份|餐|食|吃)?"
+)
+
+
+def query_has_explicit_constraint(query: str) -> bool:
+    """查询是否含明确的预算/人数约束 —— 混合召回跳过关键词通道的触发判定"""
+    if not query:
+        return False
+    if _extract_budget(query) is not None:
+        return True
+    return bool(_SERVING_PATTERN.search(query))
+
+
 def _single_query_recall(
-    vs, query: str, top_k: int, filter_source_type: Optional[str], hybrid: bool
+    vs, query: str, top_k: int, filter_source_type: Optional[str], hybrid: bool,
+    skip_kw_constraint: Optional[bool] = None,
 ) -> List[Dict]:
-    """单查询召回段（混合检索或纯向量 + 多级降级兜底），即 rag_search 的原始实现。"""
+    """单查询召回段（混合检索或纯向量 + 多级降级兜底），即 rag_search 的原始实现。
+
+    skip_kw_constraint：约束类查询是否跳过关键词通道（None 读配置，供评测对照）。
+    """
+    skip_flag = (
+        settings.RAG_HYBRID_CONSTRAINT_SKIP_KEYWORD
+        if skip_kw_constraint is None else skip_kw_constraint
+    )
+    if hybrid and skip_flag and query_has_explicit_constraint(query):
+        # 约束类查询（预算/人数）：关键词通道无有效字面信号、负贡献，
+        # 退化为纯向量召回（评测中 2/3 条预算查询由"相关菜在池"退化为 0 命中）
+        logger.info(f"约束类查询跳过关键词通道，退化为纯向量召回: {query}")
+        hybrid = False
+
     if hybrid:
         try:
             results = _hybrid_search(vs, query, top_k, filter_source_type)
@@ -1062,7 +1107,8 @@ def _single_query_recall(
 
 def rag_search(query: str, top_k: int = None, filter_source_type: str = None,
                hybrid: Optional[bool] = None, rewrite: Optional[bool] = None,
-               rewritten_query: Optional[str] = None) -> List[Dict]:
+               rewritten_query: Optional[str] = None,
+               skip_kw_constraint: Optional[bool] = None) -> List[Dict]:
     """
     RAG 检索核心函数（查询改写 + 混合召回 + 多级降级容错）。
 
@@ -1075,6 +1121,10 @@ def rag_search(query: str, top_k: int = None, filter_source_type: str = None,
       2. RRF 排名融合：score(d) = Σ 1/(k + rank_i(d))，只看名次不看分数，
          规避两路分数量纲不可比问题；融合后截断 top_k
       3. 可选按 source_type 过滤（两路通道过滤语义一致）
+      4. 约束类查询（含预算金额/用餐人数）跳过关键词通道、退化为纯向量召回：
+         约束词与"东北""家常"等泛类别词的字面命中会把同类无关菜推入前排，
+         经融合后挤掉语义命中的确切菜谱（见 query_has_explicit_constraint）；
+         改写查询若同样含该约束（改写保留预算信息）则一并跳过
 
     【降级链路】
       - 查询改写失败/超时/校验不过：回退原查询（不中断、不抛异常）
@@ -1085,6 +1135,8 @@ def rag_search(query: str, top_k: int = None, filter_source_type: str = None,
 
     hybrid / rewrite 可显式覆盖配置（供评测对照实验使用）；
     缺省分别读 RAG_HYBRID_SEARCH / RAG_QUERY_REWRITE。
+    skip_kw_constraint 控制约束类查询是否跳过关键词通道（None 读配置
+    RAG_HYBRID_CONSTRAINT_SKIP_KEYWORD，供"修复前后"对照实验显式覆盖）。
     rewritten_query 用于注入已算好的改写结果（评测中每条查询只调一次 LLM，
     多个对照模式复用同一改写，避免重复调用引入抖动与成本）。
     返回每个结果包含 content（文档内容）、source_type、source_id、title、tags。
@@ -1099,13 +1151,16 @@ def rag_search(query: str, top_k: int = None, filter_source_type: str = None,
         rewritten_query = plan_query_rewrite(query)
 
     vs = get_vectorstore()
-    results = _single_query_recall(vs, query, top_k, filter_source_type, hybrid)
+    results = _single_query_recall(
+        vs, query, top_k, filter_source_type, hybrid, skip_kw_constraint
+    )
 
     # 改写查询二次召回：与原查询结果 RRF 融合（原查询召回能力始终保留）
     if rewritten_query and rewritten_query != query:
         try:
             extra = _single_query_recall(
-                vs, rewritten_query, top_k, filter_source_type, hybrid
+                vs, rewritten_query, top_k, filter_source_type, hybrid,
+                skip_kw_constraint,
             )
             results = _merge_ranked_results(results, extra, top_k)
         except Exception as e:

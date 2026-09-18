@@ -99,6 +99,13 @@ class TestRewriteCleaningAndValidation:
         # 非约束数字（"30分钟"）允许改写丢弃，不影响校验通过
         assert rag._validate_rewrite("西红柿炒鸡蛋 家常红烧肉", "30分钟搞定的快手家常菜") is True
 
+    def test_validate_allows_dropping_servings(self, fake_vs):
+        # 硬校验仅覆盖预算金额：人数约束依赖提示词保留、未强制校验，
+        # 改写丢弃"三个人"仍通过校验（该路径因此不触发约束跳过、继续双通道，
+        # 改写含具体菜名时 BM25 为正贡献）。此处用例钉住该行为，若未来新增
+        # 人数硬校验需同步调整本用例并重跑评测对照。
+        assert rag._validate_rewrite("西红柿炒鸡蛋 家常红烧肉", "给三个人做的晚餐") is True
+
     def test_validate_accepts_grounded_rewrite(self, fake_vs):
         assert rag._validate_rewrite("预算100元 家常红烧肉 西红柿炒鸡蛋", "预算100元的家常菜") is True
 
@@ -196,7 +203,8 @@ class TestRagSearchRewritePath:
     def test_injected_rewrite_runs_second_recall_and_fusion(self, monkeypatch):
         calls = []
 
-        def _fake_recall(vs, query, top_k, filter_source_type, hybrid):
+        def _fake_recall(vs, query, top_k, filter_source_type, hybrid,
+                         skip_kw_constraint=None):
             calls.append(query)
             return [_hit(1), _hit(2)] if query == "原查询" else [_hit(3)]
 
@@ -208,7 +216,8 @@ class TestRagSearchRewritePath:
         assert {r["source_id"] for r in res} == {1, 2, 3}
 
     def test_second_recall_failure_keeps_primary(self, monkeypatch):
-        def _fake_recall(vs, query, top_k, filter_source_type, hybrid):
+        def _fake_recall(vs, query, top_k, filter_source_type, hybrid,
+                         skip_kw_constraint=None):
             if query == "改写查询":
                 raise RuntimeError("recall broken")
             return [_hit(1)]
@@ -229,7 +238,7 @@ class TestRagSearchRewritePath:
 
         monkeypatch.setattr(rag, "plan_query_rewrite", _plan)
         monkeypatch.setattr(rag, "_single_query_recall",
-                            lambda vs, q, k, f, h: [_hit(1)] if q == "原查询" else [_hit(3)])
+                            lambda vs, q, k, f, h, s=None: [_hit(1)] if q == "原查询" else [_hit(3)])
         monkeypatch.setattr(rag, "get_vectorstore", lambda: SimpleNamespace())
         res = rag.rag_search("原查询", top_k=5, filter_source_type="recipe")
         assert called["plan"] is True

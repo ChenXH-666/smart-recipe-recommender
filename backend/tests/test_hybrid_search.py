@@ -204,6 +204,93 @@ class TestRagSearchHybridSwitch:
         assert res and res[0]["source_id"] == 1
 
 
+# ------------------------------ 约束类查询跳过关键词通道 ------------------------------
+
+class TestConstraintQuerySkipKeyword:
+    """约束类查询（预算/人数）跳过 BM25 关键词通道 —— 修复约束组召回回退。
+
+    背景：BM25 对"东北""家常"等泛类别词的大面积字面命中会把同类无关菜
+    推入前排、经 RRF 融合后挤掉向量通道语义命中的确切菜谱。
+    """
+
+    DOCS = [
+        ("菜谱：清蒸鲈鱼", {"source_type": "recipe", "source_id": 1, "title": "清蒸鲈鱼", "tags": ""}),
+        ("菜谱：家常地三鲜", {"source_type": "recipe", "source_id": 2, "title": "家常地三鲜", "tags": "家常菜"}),
+    ]
+
+    @pytest.mark.parametrize("query,expected", [
+        ("预算100元的东北菜家常菜", True),
+        ("300块以内的东北菜", True),
+        ("花150元做几个菜", True),
+        ("给三个人做的晚餐", True),
+        ("5人份的家常菜", True),
+        ("一人食简单午餐", True),
+        ("清蒸鲈鱼的做法", False),
+        ("5块排骨怎么做", False),               # 量词不误判为货币（历史踩坑）
+        ("下班后30分钟搞定的快手家常菜", False),  # 时长不是约束条件
+    ])
+    def test_constraint_detection(self, query, expected):
+        assert rag.query_has_explicit_constraint(query) is expected
+
+    def test_hybrid_skips_keyword_for_constraint_query(self, monkeypatch):
+        called = {"kw": False}
+
+        def _kw(*a, **k):
+            called["kw"] = True
+            return []
+
+        monkeypatch.setattr(rag, "_bm25_keyword_search", _kw)
+        vs = _fake_vs(self.DOCS, sim_docs=self.DOCS)
+        monkeypatch.setattr(rag, "get_vectorstore", lambda: vs)
+        res = rag.rag_search("预算100元的东北菜家常菜", top_k=2,
+                             filter_source_type="recipe", hybrid=True)
+        assert called["kw"] is False          # 关键词通道被跳过（退化为纯向量）
+        assert res and res[0]["source_id"] == 1
+
+    def test_non_constraint_query_still_uses_keyword(self, monkeypatch):
+        called = {"kw": False}
+
+        def _kw(*a, **k):
+            called["kw"] = True
+            return []
+
+        monkeypatch.setattr(rag, "_bm25_keyword_search", _kw)
+        vs = _fake_vs(self.DOCS, sim_docs=self.DOCS)
+        monkeypatch.setattr(rag, "get_vectorstore", lambda: vs)
+        rag.rag_search("清蒸鲈鱼", top_k=2, filter_source_type="recipe", hybrid=True)
+        assert called["kw"] is True
+
+    def test_explicit_override_disables_skip(self, monkeypatch):
+        """评测对照用：skip_kw_constraint=False 显式保留关键词通道（修复前行为）"""
+        called = {"kw": False}
+
+        def _kw(*a, **k):
+            called["kw"] = True
+            return []
+
+        monkeypatch.setattr(rag, "_bm25_keyword_search", _kw)
+        vs = _fake_vs(self.DOCS, sim_docs=self.DOCS)
+        monkeypatch.setattr(rag, "get_vectorstore", lambda: vs)
+        rag.rag_search("预算100元的东北菜家常菜", top_k=2, filter_source_type="recipe",
+                       hybrid=True, skip_kw_constraint=False)
+        assert called["kw"] is True
+
+    def test_config_switch_disables_skip(self, monkeypatch):
+        """配置关闭（RAG_HYBRID_CONSTRAINT_SKIP_KEYWORD=False）时维持双通道原行为"""
+        called = {"kw": False}
+
+        def _kw(*a, **k):
+            called["kw"] = True
+            return []
+
+        monkeypatch.setattr(rag.settings, "RAG_HYBRID_CONSTRAINT_SKIP_KEYWORD", False)
+        monkeypatch.setattr(rag, "_bm25_keyword_search", _kw)
+        vs = _fake_vs(self.DOCS, sim_docs=self.DOCS)
+        monkeypatch.setattr(rag, "get_vectorstore", lambda: vs)
+        rag.rag_search("给三个人做的晚餐", top_k=2, filter_source_type="recipe", hybrid=True)
+        assert called["kw"] is True
+
+
 # ------------------------------ 索引失效钩子 ------------------------------
 
 class TestKwIndexInvalidation:
