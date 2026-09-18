@@ -1,22 +1,31 @@
 """
-Rerank 精排评测脚本 v4 —— 论文实验：召回模式（纯向量 vs 混合+RRF）× 融合权重 α 扫描
+Rerank 精排评测脚本 v5 —— 论文实验：召回模式（纯向量 / 混合+RRF / 混合+查询改写）× 融合权重 α 扫描
 
 遵循 rag-eval 科研评测规范（.trae/skills/rag-eval）：
   - 基线 + 消融 + 参数敏感性三合一：
-      召回模式 ∈ {vector: 纯向量召回（原链路）, hybrid: 混合召回（向量+BM25，RRF 融合）}
+      召回模式 ∈ {vector: 纯向量召回（原链路）,
+                  hybrid: 混合召回（向量+BM25，RRF 融合）,
+                  hybrid_rw: 混合召回 + 查询改写（无实体词查询经 LLM 改写后双查询召回 RRF 融合）}
       α ∈ {0, 0.3, 0.5, 0.7, 1.0}，α=0 即纯召回排序基线，α=1 即纯精排消融，中间为融合。
-  - 同分复用：每条查询每个召回模式只调 1 次 Rerank API，各 α 在本地重算（控制成本与抖动）。
+  - 同分复用：每条查询每个召回模式只调 1 次 Rerank API，各 α 在本地重算（控制成本与抖动）；
+    查询改写同样每条查询只调 1 次 LLM，所有模式共用同一改写结果。
   - 分层汇报：全量平均 + 命中子集（相关菜已进候选池的查询）+ 按查询类型分组，
     把"第一级召回失败"与"排序质量差"两类问题分开。
-  - 论文输出：结果同时打印并保存为 Markdown（可直接粘进论文）与 JSON（复算用）。
+  - 论文输出：结果同时打印并保存为 Markdown（可直接粘进论文）与 JSON（复算用），
+    并附"查询改写记录"（触发与否 / 改写文本 / LLM 耗时，作为改写效果的直接证据）。
+  - 数据一致性：文档/论文引用时**以同一次运行的结果为准**。默认一次跑完全部召回模式，
+    输出文件即为该批数据；不同日期分别跑出的结果会因库内向量数据变化与精排服务
+    抖动而存在末位差异（≤0.01），混用会让同一配置在文中出现两个数字，故不应混用。
 
-用法（先 conda activate food；须访问真实 Chroma 与 SiliconFlow，须先停后端）：
+用法（先 conda activate food；须访问真实 Chroma 与 SiliconFlow/LLM，须先停后端）：
     cd backend
     python import_data/eval_rerank.py --dump-titles          # 打印库内菜名（标注辅助）
-    python import_data/eval_rerank.py                        # 混合实验（默认全模式+全 α）
+    python import_data/eval_rerank.py                        # 全模式实验（默认含 hybrid_rw）
     python import_data/eval_rerank.py -k 12                  # 改截断 K
     python import_data/eval_rerank.py --alphas 0,0.5         # 只跑部分 α
-    python import_data/eval_rerank.py --modes vector          # 只跑纯向量（复现旧基线）
+    python import_data/eval_rerank.py --modes vector,hybrid   # 只跑旧对照（复现历史结果）
+    python import_data/eval_rerank.py --modes hybrid,hybrid_rw --out-prefix eval_rewrite
+                                                              # 混合召回 vs 查询改写对照
     python import_data/eval_rerank.py --out-prefix eval_hybrid  # 指定输出文件名前缀
 
 评测集格式（category ∈ exact/cuisine/scenario/budget）：
@@ -29,6 +38,7 @@ Rerank 精排评测脚本 v4 —— 论文实验：召回模式（纯向量 vs �
 import sys
 import json
 import math
+import time
 import argparse
 import logging
 from pathlib import Path
@@ -46,6 +56,9 @@ from app.services.rag_service import (
     _fusion_sorted_pool,
     _get_popular_recipe_ids,
     _extract_budget,
+    plan_query_rewrite,
+    query_has_library_entity,
+    REWRITE_MIN_ENTITY_LEN,
 )
 
 logging.basicConfig(
@@ -60,8 +73,9 @@ DEFAULT_CASES = Path(__file__).parent / "eval_rerank_cases.json"
 # 参数敏感性扫描点：0=基线（纯召回序），1=纯精排（消融），中间=融合
 DEFAULT_ALPHAS = [0.0, 0.3, 0.5, 0.7, 1.0]
 
-# 召回模式：vector=纯向量（原链路，消融基线），hybrid=混合召回（向量+BM25，RRF 融合）
-DEFAULT_MODES = ["vector", "hybrid"]
+# 召回模式：vector=纯向量（原链路），hybrid=混合召回（向量+BM25，RRF 融合），
+# hybrid_rw=混合召回+查询改写（改写查询与原查询双路召回，RRF 融合）
+DEFAULT_MODES = ["vector", "hybrid", "hybrid_rw"]
 
 CATEGORY_CN = {
     "exact": "精确型（菜名）",
@@ -73,6 +87,7 @@ CATEGORY_CN = {
 MODE_CN = {
     "vector": "纯向量召回",
     "hybrid": "混合召回（向量+BM25，RRF）",
+    "hybrid_rw": "混合召回+查询改写（双查询 RRF）",
 }
 
 
@@ -116,18 +131,22 @@ def evaluate_ordering(ranked_ids: list, id2title: dict, relevant_ids: set, k: in
 
 # ------------------------------ 生产链路复现 ------------------------------
 
-def get_base_pool(query: str, db, hybrid: bool = False):
+def get_base_pool(query: str, db, hybrid: bool = False, rewritten_query: str = None):
     """第一级：召回 + 去重 + 热门兜底（与生产 build_recipe_pool_context 一致）。
 
     hybrid=False 走纯向量召回（原链路）；hybrid=True 走混合召回
     （向量 + BM25 双通道，RRF 融合）—— 通过 rag_search 的 hybrid 参数
     显式控制，不受 RAG_HYBRID_SEARCH 环境配置影响，保证对照实验可比。
 
+    rewritten_query 非空时，按生产链路执行"改写查询二次召回 + 双查询 RRF 融合"；
+    改写文本由调用方每条查询只计算一次并注入（rewrite=False 保证不重复触发 LLM）。
+
     返回 (pool, recipes)；pool 为召回原序的菜谱 ID 列表（不被后续排序修改）。
     """
     results = rag_search(
         query, top_k=settings.RAG_CHAT_RECALL_K,
         filter_source_type="recipe", hybrid=hybrid,
+        rewrite=False, rewritten_query=rewritten_query,
     )
     pool, seen = [], set()
     for r in results:
@@ -260,9 +279,9 @@ def render_category_table(all_rows: list, keys: list, k: int) -> str:
 
 
 def render_detail_table(all_rows: list, keys: list, k: int) -> str:
-    """逐条明细（含池命中诊断），展示基线与推荐配置：纯向量 α=0 / 混合 α=0 / 混合 α=0.5。"""
+    """逐条明细（含池命中诊断）：纯向量基线 / 混合 α=0.5 / 混合+改写 α=0.5。"""
     show = [key for key in keys
-            if key in (("vector", 0.0), ("hybrid", 0.0), ("hybrid", 0.5))]
+            if key in (("vector", 0.0), ("hybrid", 0.5), ("hybrid_rw", 0.5))]
     if not show:
         show = keys[:2]
     header = f"| 查询 | 类型 | 池命中/总相关 |"
@@ -322,15 +341,16 @@ def main():
     parser.add_argument("--alphas", type=str, default=",".join(str(a) for a in DEFAULT_ALPHAS),
                         help="逗号分隔的 α 扫描点（默认 0,0.3,0.5,0.7,1.0）")
     parser.add_argument("--modes", type=str, default=",".join(DEFAULT_MODES),
-                        help="逗号分隔的召回模式（vector=纯向量，hybrid=混合+RRF；默认两者）")
+                        help="逗号分隔的召回模式（vector=纯向量，hybrid=混合+RRF，"
+                             "hybrid_rw=混合+查询改写；默认三者）")
     parser.add_argument("--out-prefix", type=str, default="eval_rerank",
-                        help="结果文件名前缀（混合实验建议 eval_hybrid，避免覆盖旧 α 扫描结果）")
+                        help="结果文件名前缀（改写实验建议 eval_rewrite，避免覆盖旧结果）")
     args = parser.parse_args()
     alphas = [float(x) for x in args.alphas.split(",") if x.strip() != ""]
     modes = [m.strip() for m in args.modes.split(",") if m.strip()]
     for m in modes:
         if m not in MODE_CN:
-            parser.error(f"未知召回模式：{m}（可选 vector / hybrid）")
+            parser.error(f"未知召回模式：{m}（可选 vector / hybrid / hybrid_rw）")
 
     db = SessionLocal()
     try:
@@ -360,6 +380,8 @@ def main():
         cat_stat = {c: 0 for c in CATEGORY_CN}
         # 池级命中：相关菜是否进入【截断前】候选池（与 α 无关，按召回模式分别判定）
         pool_hit_queries = {m: set() for m in modes}
+        rw_records = []        # 查询改写记录：触发与否 / 改写文本 / LLM 耗时
+        need_rewrite = "hybrid_rw" in modes
 
         for case in cases:
             query = case["query"]
@@ -376,9 +398,29 @@ def main():
                 logger.warning(f"查询「{query}」无有效标注，跳过")
                 continue
 
+            # 查询改写：每条查询只调 1 次 LLM，所有模式复用同一改写结果（rewrite 模式专用）
+            rewritten = None
+            if need_rewrite:
+                triggered = not query_has_library_entity(query)
+                t0 = time.perf_counter()
+                rewritten = plan_query_rewrite(query)
+                elapsed_ms = (time.perf_counter() - t0) * 1000
+                status = ("改写成功" if rewritten
+                          else "未触发（已含实体词）" if not triggered
+                          else "回退原查询（失败/校验未过）")
+                rw_records.append({
+                    "query": query, "category": category, "triggered": triggered,
+                    "status": status, "rewritten": rewritten,
+                    "latency_ms": round(elapsed_ms, 1),
+                })
+
             # 同分复用：每个召回模式各取一次召回池与精排分数，各 α 本地重算
             for mode in modes:
-                pool, recipes = get_base_pool(query, db, hybrid=(mode == "hybrid"))
+                pool, recipes = get_base_pool(
+                    query, db,
+                    hybrid=(mode in ("hybrid", "hybrid_rw")),
+                    rewritten_query=(rewritten if mode == "hybrid_rw" else None),
+                )
                 if set(pool) & relevant_ids:
                     pool_hit_queries[mode].add(query)
                 scores = _rerank_pool_scores(query, pool, recipes)
@@ -417,7 +459,9 @@ def main():
                 f"{CATEGORY_CN[c]} {cat_stat[c]} 条"
                 for c in ("exact", "cuisine", "scenario", "budget") if cat_stat.get(c)
             ) + f"）；截断 K={k}；精排模型 {settings.RERANK_MODEL}。",
-            f"召回模式：纯向量（BGE-M3）vs 混合（向量 + BM25 关键词通道，RRF 融合，k={settings.RAG_HYBRID_RRF_K}）。",
+            "召回模式：" + " / ".join(MODE_CN[m] for m in modes)
+            + f"（RRF k={settings.RAG_HYBRID_RRF_K}；查询改写触发条件：与全库菜名无 "
+              f"{REWRITE_MIN_ENTITY_LEN} 字以上连续命中）。",
             f"融合公式：最终分 = α×精排分 + (1−α)×召回位置分。",
             "",
             "## 1. 主结果（全量）",
@@ -443,7 +487,7 @@ def main():
             "",
             render_category_table(all_rows, keys, k),
             "",
-            f"## 5. 逐条明细（纯向量基线 vs 混合召回）",
+            f"## 5. 逐条明细（纯向量基线 vs 混合召回 vs 混合+查询改写）",
             "",
             render_detail_table(all_rows, keys, k),
             "",
@@ -462,11 +506,41 @@ def main():
                 md.append(f"- {tag}：相关菜未进入候选池 0/{n} 条，第一级召回全部成功。")
         md.append("")
 
+        # ---- 查询改写记录（hybrid_rw 模式；触发与否 / 改写文本 / LLM 耗时） ----
+        md += ["## 7. 查询改写记录", ""]
+        if rw_records:
+            trig = [r for r in rw_records if r["triggered"]]
+            ok = [r for r in rw_records if r["rewritten"]]
+            lat = [r["latency_ms"] for r in ok]
+            md.append(
+                f"- 触发改写判定：{len(trig)}/{len(rw_records)} 条"
+                f"（其余查询已含库内菜名实体词，跳过、零 LLM 调用开销）；"
+                f"改写成功 {len(ok)} 条、回退原查询 {len(trig) - len(ok)} 条。"
+            )
+            if lat:
+                md.append(
+                    f"- 改写 LLM 调用耗时（仅成功条数）：平均 {sum(lat) / len(lat):.0f} ms，"
+                    f"区间 {min(lat):.0f}~{max(lat):.0f} ms"
+                    f"（该开销位于召回前置，同步计入 AI 对话首包延迟）。"
+                )
+            md += ["", "| 查询 | 类型 | 是否触发 | 结果 | 改写文本 | LLM 耗时(ms) |",
+                   "|---|---|---|---|---|---|"]
+            for r in rw_records:
+                md.append(
+                    f"| {r['query']} | {r['category']} | {'是' if r['triggered'] else '否'} | "
+                    f"{r['status']} | {r['rewritten'] or '—'} | {r['latency_ms']:.0f} |"
+                )
+        else:
+            md.append("（本次未包含 hybrid_rw 模式，无查询改写记录）")
+        md.append("")
+
         text = "\n".join(md)
         print(text)
         result_md.write_text(text, encoding="utf-8")
         result_json.write_text(
-            json.dumps(all_rows, ensure_ascii=False, indent=2), encoding="utf-8"
+            json.dumps({"rows": all_rows, "rewrite_records": rw_records},
+                       ensure_ascii=False, indent=2),
+            encoding="utf-8",
         )
         print(f"结果已保存：{result_md}\n               {result_json}\n")
     finally:

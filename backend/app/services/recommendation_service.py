@@ -124,7 +124,11 @@ def get_personalized_prompts(
         ]
         if pref_names:
             pref_query = " ".join(pref_names)
-            rag_results = rag_search(pref_query, top_k=10, filter_source_type="recipe")
+            # 用户偏好标签拼成的查询（系统生成、已是库内词汇）无需查询改写：
+            # 显式关闭，避免首页推荐路径因多一次 LLM 调用而增加延迟
+            rag_results = rag_search(
+                pref_query, top_k=10, filter_source_type="recipe", rewrite=False
+            )
             rag_ids = [
                 int(r["source_id"]) for r in rag_results
                 if r.get("source_type") == "recipe" and r.get("source_id")
@@ -500,7 +504,10 @@ def get_personalized_rag_recommendations(
     results: List[Dict] = []
     seen_ids: set = set()
     try:
-        rag_results = rag_search(pref, top_k=limit * 3, filter_source_type="recipe")
+        # pref 为用户偏好标签拼成的系统查询（非自然语言），关闭查询改写
+        rag_results = rag_search(
+            pref, top_k=limit * 3, filter_source_type="recipe", rewrite=False
+        )
     except Exception as e:
         logger.error(f"个性化 RAG 检索失败（将回退标签匹配）: {e}")
         rag_results = []
@@ -615,7 +622,10 @@ def get_personalized_meal_plans(
 
     pref_recipe_ids: set = set()
     try:
-        rag_results = rag_search(pref, top_k=40, filter_source_type="recipe")
+        # 同上：偏好标签拼成的系统查询，关闭查询改写
+        rag_results = rag_search(
+            pref, top_k=40, filter_source_type="recipe", rewrite=False
+        )
         pref_recipe_ids = {
             int(r["source_id"])
             for r in rag_results

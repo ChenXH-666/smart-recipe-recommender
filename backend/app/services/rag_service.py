@@ -8,14 +8,18 @@ RAG (Retrieval-Augmented Generation) 服务 —— 向量构建、混合检索�
 本系统的 RAG 实现采用"混合召回 + 两阶段检索 + LLM 增强"架构：
 
 【整体流程】
-  用户提问 → 混合召回（双路并行 + RRF 融合）
+  用户提问 → 查询改写（可选：无实体词查询经 LLM 补全菜名/食材实体，与原查询双路召回 RRF 融合）
+          → 混合召回（双路并行 + RRF 融合）
           ├─ 向量通道：Embedding 向量化 → Chroma 余弦相似度检索（语义泛化）
           └─ 关键词通道：BM25 评分检索（字面精确匹配，如菜名/食材整词命中）
           → RRF 排名融合（score = Σ 1/(k + rank_i)，k=60）
           → Rerank 交叉编码精排（α×精排分 + (1-α)×召回位置分融合）
           → 拼接上下文 → LLM 生成回答
 
-  即"两级检索"（Two-Stage Retrieval）架构：
+  即"两级检索"（Two-Stage Retrieval）架构（前置可选查询改写）：
+    - 前置查询改写：对"快手家常菜""减脂晚餐"这类不含实体词的口语化查询，
+      LLM 先改写为含库内真实菜名/食材的检索表达，与原查询双路召回后 RRF 融合
+      （改写不替换原查询，原召回能力始终保留；改写失败/幻觉菜名自动回退原查询）；
     - 第零级混合召回：向量双塔（BGE-M3）与 BM25 关键词两路并行——
       前者擅长语义泛化（"下饭菜"≈米饭配菜），后者擅长字面精确
       （"红烧肉"整词命中），RRF 只按名次融合、规避两路分数量纲
@@ -49,6 +53,14 @@ RAG (Retrieval-Augmented Generation) 服务 —— 向量构建、混合检索�
      - chunk_overlap=50：相邻块重叠 50 字符，防止关键信息被截断
      - 分隔符优先级：段落 > 换行 > 中文句号 > 逗号 > 空格
        这样能优先在自然语义边界处切割
+
+  5. 查询改写（Query Rewriting，可选前置，RAG_QUERY_REWRITE=true）：
+     - 触发判定：查询与全库菜名无 ≥3 字连续片段命中即视为"无实体词"
+       （复用 BM25 索引构建时生成的菜名 n-gram 词表，零额外扫描开销）
+     - 改写：LLM 将口语化需求补全为含具体菜名/食材的检索表达，保留预算等约束
+     - 校验：改写结果须含库内真实菜名（≥3 字命中，防幻觉菜名）且保留原数值约束
+     - 融合：改写查询与原查询各自召回后经 RRF 排名融合（原查询能力始终保留）
+     - 降级：未触发/调用失败/超时/校验不过 → 静默回退原查询，不影响主链路
 
 【数据同步机制】
   - 菜谱/心得创建时自动同步到向量库（实时增量）
@@ -501,14 +513,24 @@ def _build_kw_index(vs) -> Optional[Dict]:
       doc_len:  各文档 token 数（BM25 长度归一化用）
       avgdl:    平均文档长度
       docs/metas: 分块正文与元数据快照
+      title_ngrams: 全库菜名的 3~12 字 n-gram 集合（查询改写的实体词判定与校验用）
     """
     raw = vs._collection.get(include=["documents", "metadatas"])
     docs = raw.get("documents") or []
     metas = raw.get("metadatas") or []
     terms: Dict[str, List[tuple]] = {}
     doc_len: List[int] = []
+    # 菜名词表：判定查询是否含实体词、校验改写结果是否含库内真实菜名（见 plan_query_rewrite）。
+    # 只收录菜谱分块的标题（心得标题如"新手必学的三道家常菜"含泛词，会误判查询"已含实体词"）。
+    title_ngrams: set = set()
     for idx, doc in enumerate(docs):
         meta = metas[idx] or {}
+        title = str(meta.get("title") or "") if meta.get("source_type") == "recipe" else ""
+        for n in range(REWRITE_MIN_ENTITY_LEN, _TITLE_NGRAM_MAX + 1):
+            if n > len(title):
+                break
+            for i in range(len(title) - n + 1):
+                title_ngrams.add(title[i:i + n])
         text = (
             str(meta.get("title") or "") * 3
             + str(meta.get("tags") or "") * 2
@@ -531,6 +553,7 @@ def _build_kw_index(vs) -> Optional[Dict]:
         "avgdl": avgdl,
         "docs": docs,
         "metas": metas,
+        "title_ngrams": title_ngrams,
     }
 
 
@@ -814,34 +837,192 @@ def _fallback_metadata_search(
         return []
 
 
-def rag_search(query: str, top_k: int = None, filter_source_type: str = None,
-               hybrid: Optional[bool] = None) -> List[Dict]:
+# ============================================================================
+# 查询改写（Query Rewriting）：无实体词查询 → LLM 补全实体词 → 双查询召回 RRF 融合
+# ============================================================================
+
+# 判定"含实体词"的最小连续命中长度：查询与库内菜名存在 ≥N 字连续片段即视为
+# 已含实体词（"清蒸鲈鱼的做法"命中菜名"清蒸鲈鱼"），不再触发改写。
+# 2 字命中（"家常""潮汕"）过泛、不足以定位具体菜品，仍视为无实体词。
+REWRITE_MIN_ENTITY_LEN = 3
+# 菜名 n-gram 最长长度（覆盖库内最长菜名），用于"最长命中"检测与改写结果校验
+_TITLE_NGRAM_MAX = 12
+# 改写结果长度上限（字符）：检索表达宜短，超长说明模型跑题（输出解释/整段菜单）
+_REWRITE_MAX_CHARS = 80
+
+# 改写提示词 —— 目标是"检索表达"而非回答：补全实体词、保留约束、控制长度
+_REWRITE_SYSTEM_PROMPT = (
+    "你是菜谱检索系统的查询改写助手。用户会给你一句口语化的找菜需求（通常不含具体菜名），"
+    "请把它改写为一条更适合检索的短语句：补充 2~4 个中国家庭常见、菜谱库中很可能存在的"
+    "具体菜名或主食材（如“西红柿炒鸡蛋”“清蒸鲈鱼”），保留原句中的口味、场景、忌口、"
+    "预算金额、人数等约束信息。要求：\n"
+    "1. 只输出改写后的检索语句本身（一行，不超过 60 字），不要解释、不要编号、不要 Markdown；\n"
+    "2. 原句中的预算等数值（如“预算100元”）必须原样保留；\n"
+    "3. 不要输出生僻菜品，优先大众家常菜名。"
+)
+
+
+def _get_title_ngrams() -> set:
+    """全库菜名 n-gram 词表（取自 BM25 索引，懒构建、随向量库写操作自动失效）"""
+    try:
+        index = _get_kw_index(get_vectorstore())
+    except Exception as e:
+        logger.warning(f"菜名词表获取失败（按无实体词处理）: {e}")
+        return set()
+    return (index or {}).get("title_ngrams") or set()
+
+
+def _max_title_match_len(text: str, title_ngrams: set) -> int:
     """
-    RAG 检索核心函数（混合召回 + 多级降级容错）。
+    文本与全库菜名的最长连续命中长度（从最长 n-gram 起向短匹配，命中即返回）。
 
-    【主流程】（RAG_HYBRID_SEARCH=true，默认）
-      1. 双路召回并行：向量语义检索（BGE-M3 + Chroma 余弦相似度）
-         与 BM25 关键词检索，各取 top_k 个候选分块
-      2. RRF 排名融合：score(d) = Σ 1/(k + rank_i(d))，只看名次不看分数，
-         规避两路分数量纲不可比问题；融合后截断 top_k
-      3. 可选按 source_type 过滤（两路通道过滤语义一致）
-
-    【降级链路】
-      - 任一通道失败：退化为单通道排序（不中断、不抛异常）
-      - 混合检索整体异常/关闭：回退纯向量检索（原链路）
-      - 纯向量也无结果：兜底 metadata + 关键词 n-gram 评分
-      - 保证任何情况下都不会抛异常导致接口 500
-
-    hybrid 参数可显式覆盖配置（供评测对照实验使用）；缺省读 RAG_HYBRID_SEARCH。
-    返回每个结果包含 content（文档内容）、source_type、source_id、title、tags。
+    词表仅收录 ≥3 字 n-gram，故返回值只有两种含义：≥3 = 命中的具体长度，
+    0 = 无有效命中（含仅 2 字泛词命中的情况）。用于两项判定：
+      ① 原查询 ≥3 = 已含实体词、无需改写；0 = 无实体词、触发改写
+      ② 改写结果 ≥3 = 至少含一个库内真实菜名（防幻觉菜名污染检索）
     """
-    if top_k is None:
-        top_k = settings.RAG_TOP_K
+    if not text or not title_ngrams:
+        return 0
+    for n in range(min(_TITLE_NGRAM_MAX, len(text)), REWRITE_MIN_ENTITY_LEN - 1, -1):
+        for i in range(len(text) - n + 1):
+            if text[i:i + n] in title_ngrams:
+                return n
+    return 0
 
-    vs = get_vectorstore()
 
-    if hybrid is None:
-        hybrid = settings.RAG_HYBRID_SEARCH
+def query_has_library_entity(query: str) -> bool:
+    """查询是否已含库内实体词（与菜名 ≥3 字连续命中）—— 查询改写的触发判定"""
+    return _max_title_match_len(query, _get_title_ngrams()) >= REWRITE_MIN_ENTITY_LEN
+
+
+def _call_rewrite_llm(query: str) -> str:
+    """
+    调用 LLM 完成一次查询改写（OpenAI 兼容 /chat/completions，同步 requests 调用）。
+
+    与对话链路共用 LLM 配置（LLM_PROVIDER / LLM_MODEL / LLM_API_KEY / LLM_BASE_URL）；
+    mimo 需在请求体传 thinking.type=disabled（与 ai_service 走 extra_body 等价），
+    避免返回推理链。失败抛异常，由 plan_query_rewrite 统一兜底。
+    """
+    url = settings.LLM_BASE_URL.rstrip("/") + "/chat/completions"
+    payload = {
+        "model": settings.LLM_MODEL,
+        "messages": [
+            {"role": "system", "content": _REWRITE_SYSTEM_PROMPT},
+            {"role": "user", "content": f"用户需求：{query}"},
+        ],
+        "temperature": 0.2,   # 改写要稳定可复现，不做发散创作
+        "max_tokens": 128,
+    }
+    if settings.LLM_PROVIDER == "mimo":
+        payload["thinking"] = {"type": "disabled"}
+    resp = requests.post(
+        url,
+        headers={
+            "Authorization": f"Bearer {settings.LLM_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json=payload,
+        timeout=settings.RAG_QUERY_REWRITE_TIMEOUT,
+    )
+    resp.raise_for_status()
+    choices = (resp.json().get("choices") or [])
+    if not choices:
+        return ""
+    return (choices[0].get("message") or {}).get("content") or ""
+
+
+def _clean_rewrite_text(text: str) -> str:
+    """清洗改写输出：取首个非空行、去包裹引号与"改写结果："类前缀，并截断超长内容"""
+    for line in (text or "").splitlines():
+        line = line.strip().strip("\"'“”`。").strip()
+        if line:
+            line = re.sub(r"^(改写结果|检索语句|改写后|查询语句|查询)[:：]\s*", "", line)
+            return line[:_REWRITE_MAX_CHARS].strip()
+    return ""
+
+
+def _validate_rewrite(rewritten: str, original: str) -> bool:
+    """
+    改写结果校验（防止改写反而伤害检索）：
+      ① 必须含库内真实菜名（≥3 字连续命中）—— 过滤 LLM 幻觉菜名；
+      ② 原查询识别出的预算金额必须原样保留 —— 预算约束不丢失
+         （只校验预算而非所有数字："30分钟""500g"等非约束数字允许改写丢掉）。
+    """
+    if _max_title_match_len(rewritten, _get_title_ngrams()) < REWRITE_MIN_ENTITY_LEN:
+        return False
+    budget = _extract_budget(original)
+    if budget is not None and str(budget) not in rewritten:
+        return False
+    return True
+
+
+def plan_query_rewrite(query: str) -> Optional[str]:
+    """
+    查询改写总入口：触发判定 → LLM 改写 → 校验 → 返回可用改写（None = 回退原查询）。
+
+    整条链路静默容错：未触发（查询已含实体词）、未配置 Key、超时/网络失败、
+    输出为空或与原查询相同、校验不过，任一情况均返回 None，由调用方回退原查询，
+    不抛异常、不阻塞主链路。已含实体词的查询不产生任何 LLM 调用开销。
+    """
+    if not query or not query.strip():
+        return None
+    try:
+        if query_has_library_entity(query):
+            logger.debug(f"查询已含库内实体词，跳过改写：{query}")
+            return None
+        if not settings.LLM_API_KEY:
+            logger.warning("查询改写跳过：未配置 LLM_API_KEY")
+            return None
+
+        rewritten = _clean_rewrite_text(_call_rewrite_llm(query))
+        if not rewritten:
+            logger.warning(f"查询改写返回空内容，回退原查询：{query}")
+            return None
+        if rewritten == query.strip():
+            return None
+        if not _validate_rewrite(rewritten, query):
+            logger.warning(f"查询改写未通过校验（幻觉菜名/约束丢失），回退原查询：{rewritten}")
+            return None
+        logger.info(f"查询改写生效：{query} → {rewritten}")
+        return rewritten
+    except Exception as e:
+        logger.warning(f"查询改写失败，回退原查询: {e}")
+        return None
+
+
+def _merge_ranked_results(primary: List[Dict], secondary: List[Dict], top_k: int) -> List[Dict]:
+    """
+    双查询召回结果融合：原查询与改写查询两路召回列表经 RRF 合并。
+
+    与混合检索共用同一套 RRF 机制（只看名次，避免两路分数量纲不可比）；
+    原查询结果始终参与融合，改写只在其名次基础上补充新候选、或提升双路共同
+    命中的候选，不会替换掉原查询的召回能力（"全量指标不退化"的结构性保障）。
+    同一分块被两路同时召回时以原查询的结果记录为准（保真）。
+    """
+    if not secondary:
+        return primary
+    if not primary:
+        return secondary
+
+    def _key(r: Dict) -> str:
+        return _chunk_key(r["content"], r["source_id"], r["source_type"])
+
+    fused = _rrf_fuse(
+        [[_key(r) for r in primary], [_key(r) for r in secondary]],
+        k=settings.RAG_HYBRID_RRF_K,
+    )[:top_k]
+    lookup: Dict[str, Dict] = {}
+    for r in secondary:
+        lookup.setdefault(_key(r), r)
+    for r in primary:
+        lookup[_key(r)] = r
+    return [lookup[key] for key in fused]
+
+
+def _single_query_recall(
+    vs, query: str, top_k: int, filter_source_type: Optional[str], hybrid: bool
+) -> List[Dict]:
+    """单查询召回段（混合检索或纯向量 + 多级降级兜底），即 rag_search 的原始实现。"""
     if hybrid:
         try:
             results = _hybrid_search(vs, query, top_k, filter_source_type)
@@ -876,6 +1057,59 @@ def rag_search(query: str, top_k: int = None, filter_source_type: str = None,
             "title": meta.get("title", ""),
             "tags": meta.get("tags", ""),
         })
+    return results
+
+
+def rag_search(query: str, top_k: int = None, filter_source_type: str = None,
+               hybrid: Optional[bool] = None, rewrite: Optional[bool] = None,
+               rewritten_query: Optional[str] = None) -> List[Dict]:
+    """
+    RAG 检索核心函数（查询改写 + 混合召回 + 多级降级容错）。
+
+    【主流程】（RAG_HYBRID_SEARCH=true，默认）
+      0. 可选查询改写（RAG_QUERY_REWRITE=true，默认）：查询不含实体词时经 LLM
+         改写为含具体菜名/食材的检索表达，与原查询双路召回后 RRF 融合；
+         未触发/失败/校验不过则静默回退原查询（见 plan_query_rewrite）
+      1. 双路召回并行：向量语义检索（BGE-M3 + Chroma 余弦相似度）
+         与 BM25 关键词检索，各取 top_k 个候选分块
+      2. RRF 排名融合：score(d) = Σ 1/(k + rank_i(d))，只看名次不看分数，
+         规避两路分数量纲不可比问题；融合后截断 top_k
+      3. 可选按 source_type 过滤（两路通道过滤语义一致）
+
+    【降级链路】
+      - 查询改写失败/超时/校验不过：回退原查询（不中断、不抛异常）
+      - 任一召回通道失败：退化为单通道排序（不中断、不抛异常）
+      - 混合检索整体异常/关闭：回退纯向量检索（原链路）
+      - 纯向量也无结果：兜底 metadata + 关键词 n-gram 评分
+      - 保证任何情况下都不会抛异常导致接口 500
+
+    hybrid / rewrite 可显式覆盖配置（供评测对照实验使用）；
+    缺省分别读 RAG_HYBRID_SEARCH / RAG_QUERY_REWRITE。
+    rewritten_query 用于注入已算好的改写结果（评测中每条查询只调一次 LLM，
+    多个对照模式复用同一改写，避免重复调用引入抖动与成本）。
+    返回每个结果包含 content（文档内容）、source_type、source_id、title、tags。
+    """
+    if top_k is None:
+        top_k = settings.RAG_TOP_K
+    if hybrid is None:
+        hybrid = settings.RAG_HYBRID_SEARCH
+    if rewritten_query is None and rewrite is None:
+        rewrite = settings.RAG_QUERY_REWRITE
+    if rewritten_query is None and rewrite:
+        rewritten_query = plan_query_rewrite(query)
+
+    vs = get_vectorstore()
+    results = _single_query_recall(vs, query, top_k, filter_source_type, hybrid)
+
+    # 改写查询二次召回：与原查询结果 RRF 融合（原查询召回能力始终保留）
+    if rewritten_query and rewritten_query != query:
+        try:
+            extra = _single_query_recall(
+                vs, rewritten_query, top_k, filter_source_type, hybrid
+            )
+            results = _merge_ranked_results(results, extra, top_k)
+        except Exception as e:
+            logger.error(f"改写查询召回失败（沿用原查询结果）: {e}")
     return results
 
 
@@ -1081,6 +1315,8 @@ def build_recipe_pool_context(
     为对话构建高信息密度的菜谱候选池上下文。
 
     链路（对应优化点）：
+      ⓪ 查询改写：无实体词的口语化需求（"快手家常菜""减脂晚餐"）先经 LLM 补全菜名/
+         食材实体，与原查询双路召回 RRF 融合；未触发/失败自动回退原查询（① 内完成）。
       ① 召回兜底：向量召回（按菜谱去重）后若为空/过少，用热门菜谱二次补齐，
          保证任何查询都有库内菜品锚定，杜绝模型靠内部知识编造。
       ①.5 Rerank 精排：对候选池做交叉编码打分，并经分数融合（α×精排分 +

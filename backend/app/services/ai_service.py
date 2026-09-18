@@ -251,9 +251,9 @@ async def chat_stream(
 
     # RAG 检索 —— 召回较多候选，按菜谱去重并剔除用户忌口后，输出紧凑候选池
     # 若用户在为他人做菜（消息命中"给…/请客/招待"等表达），不硬性拦截其本人忌口
-    # ⚠ build_recipe_pool_context 内部含同步 HTTP 调用（Embedding 最长 30s + Rerank 10s），
-    #   直接在事件循环里执行会阻塞全站所有请求 1~40 秒；用 asyncio.to_thread 放入
-    #   线程池执行，期间其他用户的请求正常处理。db 会话在工作线程中独占使用
+    # ⚠ build_recipe_pool_context 内部含同步 HTTP 调用（查询改写 10s + Embedding 最长 30s +
+    #   Rerank 10s），直接在事件循环里执行会阻塞全站所有请求数十秒；用 asyncio.to_thread
+    #   放入线程池执行，期间其他用户的请求正常处理。db 会话在工作线程中独占使用
     #   （事件循环线程此期间不触碰该会话），符合 SQLAlchemy 单线程会话约束。
     context = ""
     if use_rag and db is not None:

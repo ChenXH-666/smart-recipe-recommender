@@ -12,6 +12,7 @@
 | 向量库 | ChromaDB（本地持久化） |
 | 大模型 | LLM 默认小米 Mimo（mimo-v2.5，关闭深度思考）；Embedding/Rerank 恒用 SiliconFlow（BGE-M3 嵌入 + bge-reranker-v2-m3 精排） |
 | 混合检索 | 向量（BGE-M3）+ BM25 关键词双路召回，RRF 排名融合（k=60）；BM25 内存索引随向量同步自动失效重建 |
+| 查询改写 | 无实体词查询（与全库菜名无 ≥3 字连续命中）经 LLM 补全具体菜名/食材，与原查询双路召回再经 RRF 融合；改写须含库内真实菜名且保留预算约束，否则静默回退原查询 |
 | 认证 | JWT Token |
 
 ## 功能模块
@@ -22,8 +23,8 @@
 | 菜谱服务 | 菜谱浏览、详情查看、关键词/难度/预算筛选、创建/编辑菜谱 |
 | 用户中心 | 登录注册、收藏管理、浏览历史、AI对话记录、待做清单（近期要做）、菜谱合集（一键生成套餐） |
 | 互动模块 | 菜谱评分点评、烹饪心得分享(创建+浏览) |
-| 智能推荐 | 基于用户历史的个性化推荐、预算筛选推荐、自然语言搜索推荐；新号走冷启动多样推荐、忌口过滤前置 |
-| AI 助手 | 流式多轮对话、RAG 增强菜谱问答（混合检索：BGE-M3 向量 + BM25 关键词双路召回、RRF 融合，再经 bge-reranker-v2-m3 交叉编码精排、分数融合 α=0.5 微调排序，通道失败自动降级）、单菜/套餐智能推荐；仅推荐菜谱库内真实菜品，支持用户忌口过滤与预算感知（尽量用足预算） |
+| 智能推荐 | 基于用户历史的个性化推荐、预算筛选推荐、自然语言搜索推荐（用户自写且不含实体词的查询经查询改写补全实体后检索）；新号走冷启动多样推荐、忌口过滤前置 |
+| AI 助手 | 流式多轮对话、RAG 增强菜谱问答（查询改写：无实体词需求先经 LLM 补全菜名/食材再与原查询双路召回 RRF 融合；混合检索：BGE-M3 向量 + BM25 关键词双路召回、RRF 融合；bge-reranker-v2-m3 交叉编码精排、分数融合 α=0.5 微调排序，通道/改写失败自动降级）、单菜/套餐智能推荐；仅推荐菜谱库内真实菜品，支持用户忌口过滤与预算感知（尽量用足预算） |
 | 套餐服务 | 套餐浏览（广场卡片展示封面图）、创建自定义套餐、用户提交新食材（创建菜谱入口，待管理员审核） |
 
 ### 管理端
@@ -160,7 +161,7 @@ cd backend
 conda activate food
 python -m pytest tests -v --cov=app --cov-report=term-missing
 ```
-单元测试基于 pytest 编写，共 198 个用例，覆盖纯函数 / 模型 / 服务 / 接口四层；测试使用 SQLite 内存库并对 Chroma、LLM 等外部依赖打桩隔离，无需连接真实数据库与模型服务。整体行覆盖率约 62%，核心逻辑（配置、安全、统计、营养、工具函数、AI 引擎）覆盖率 74%~100%。
+单元测试基于 pytest 编写，共 224 个用例，覆盖纯函数 / 模型 / 服务 / 接口四层；测试使用 SQLite 内存库并对 Chroma、LLM 等外部依赖打桩隔离，无需连接真实数据库与模型服务。整体行覆盖率约 63%，核心逻辑（配置、安全、统计、营养、工具函数、AI 引擎）覆盖率 74%~100%。
 
 ### 7. 运行接口性能基准
 ```bash
@@ -171,6 +172,18 @@ python import_data/bench_api.py --username <账号> --password <密码>
 python import_data/bench_api.py --username <账号> --password <密码> --skip-ai   # 跳过 AI 首包（省 LLM 额度）
 ```
 以真实 HTTP 请求测量已运行的后端（需后端已运行在 8000 端口，建议以 `--proxy-headers` 启动，否则登录接口"10 次/分钟/IP"的限流会使登录样本自动降为限流窗口内的 10 次）：核心接口串行延迟（N=100）、AI 对话首包延迟（SSE，默认 6 条）、并发承载（10/20/50）与首页统计缓存冷/热对比，结果同时输出 Markdown/JSON 报告（`import_data/bench_api_results.md/.json`，为论文 6.5 节性能测试数据来源）。
+
+### 8. 运行检索质量评测
+```bash
+cd backend
+conda activate food
+# 需先停掉后端（避免 Chroma 文件占用），并配置好 Embedding/Rerank/LLM 的 API Key
+python import_data/eval_rerank.py --dump-titles                 # 打印库内菜名（评测集标注辅助）
+python import_data/eval_rerank.py --modes vector,hybrid,hybrid_rw --out-prefix eval_rewrite
+# 召回模式：vector=纯向量 / hybrid=混合召回（向量+BM25，RRF）/ hybrid_rw=混合召回+查询改写（双查询 RRF）
+# 结果同时输出 Markdown/JSON（import_data/eval_*_results.md/.json，为论文 6.4 节实验数据来源）
+```
+评测集为 `import_data/eval_rerank_cases.json`（20 条分层查询：精确型/类别型/场景意图型/约束型，57 个相关菜谱标注），指标为 Recall@K / MRR / NDCG@K（默认 K=12，与线上候选池上限一致），并附「查询改写记录」（触发与否、改写文本、LLM 耗时）与「池级命中」诊断。
 
 **存量库升级提示（v1.1 唯一约束）**：浏览历史表新增了防并发重复的数据库唯一约束。新库执行 `SQL/init.sql` 自动生效；**已有旧库**需手动迁移（先清重复行再加约束，SQL 见 `database_design.md` 3.9 节），否则并发双击仍可能产生重复浏览记录。
 
@@ -189,6 +202,7 @@ python import_data/bench_api.py --username <账号> --password <密码> --skip-a
 | 首页统计 TTL 缓存 | `api/stats.py` | 7 次聚合 COUNT 缓存 60 秒，首页访问不再全量统计 | 连续两次访问 /api/stats，日志只查一次库 |
 | 详情接口 N+1 修复 | `api/recipes.py` | commit 后重新预加载 tags/ingredients/steps/author，避免懒加载回潮 | 打开详情页，后端日志仅 3~4 条 SQL |
 | 向量同步后台化 | `services/rag_service.py` `sync_*_by_id` | 创建/编辑/审核菜谱、心得时的 Embedding 同步改 `BackgroundTasks`，不再阻塞响应 | 管理员审核通过菜谱应立即返回，向量同步随后完成 |
+| 查询改写按需触发 | `services/rag_service.py` `plan_query_rewrite` | 仅当查询与全库菜名无 3 字以上连续命中（如"快手家常菜"）时才调用一次 LLM 改写，已含实体词的查询零开销；改写结果校验不过（幻觉菜名/丢预算）即回退原查询 | 发"清蒸鲈鱼的做法"无改写日志、发"减脂晚餐"有"查询改写生效"日志；改写链路失败时对话仍正常返回 |
 | 会话列表摘要查询 | `api/users.py` `get_conversations` | 子查询只取首/末消息 ID + 批量取内容，不再 joinedload 全量消息 | 打开对话历史页，长会话也不慢 |
 | LLM 客户端单例 | `services/ai_service.py` `_get_llm` | 复用 `ChatOpenAI`（含 httpx 连接池），避免每轮重建握手 | 连续对话时首轮后无重建开销 |
 | 对话历史按需重载 | `api/ai.py` + `has_memory` | 仅内存缓存未命中时才查库重建，活跃会话零 DB 开销 | 连续对话不再每轮全量查历史 |
