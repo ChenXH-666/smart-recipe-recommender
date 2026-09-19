@@ -1012,8 +1012,8 @@ def _effective_rerank_query(query: str, rewritten: Optional[str]) -> str:
     用含菜名的改写文本打 0.97（终序 3）；改写文本提供菜名字面/语义匹配信号。
 
     为何拼接而非只用改写文本：改写聚焦 1~2 个菜名后，若精排只看改写文本，类别型
-    查询会被这几个菜名主导、其余同类菜被压低（评测：类别组 MRR 0.583→0.500）；
-    保留原查询（含"潮汕""川菜"等类别词）可兼顾两侧，评测中所有分组均无退化。
+    查询会被这几个菜名主导、其余同类菜被压低——"候选池完全相同、仅精排打分查询不同"
+    的单变量对照中，改写式类别组 MRR 0.500、低于拼接式 0.583（详见论文 6.4.5 节③）。
     """
     if rewritten and settings.RAG_RERANK_QUERY_REWRITE:
         return f"{query} {rewritten}"
