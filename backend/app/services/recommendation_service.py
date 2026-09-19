@@ -1,9 +1,10 @@
 """推荐引擎"""
 
 import logging
-import re
 from typing import List, Dict, Optional
 from sqlalchemy.orm import Session, joinedload
+
+from app.utils.text_match import keyword_match_score, tokenize_query
 
 from app.models import (
     Recipe, MealPlan, MealPlanItem, UserFavorite, UserBrowseHistory, RecipeTag,
@@ -195,13 +196,8 @@ def _db_keyword_fallback_recipes(
     if not query:
         return []
 
-    # 从查询中抽取关键词（去除常见标点与无关词）
-    stopwords = {"推荐", "帮", "我", "的", "一个", "点", "些", "想", "要", "吃", "做", "个",
-                 "便宜", "好吃", "简单", "点的", "来点", "今天", "请问", "有没有", "有什么"}
-    raw_tokens = [t for t in re.split(r"[\s，。、；：,.;:!?()（）\[\]【】\"'《》]+", query) if t]
-    tokens = [t for t in raw_tokens if t and t not in stopwords]
-    if not tokens:
-        tokens = raw_tokens or [query]
+    # 从查询中抽取关键词（去标点、去口语停用词；见 app/utils/text_match.py）
+    tokens = tokenize_query(query)
 
     # 先拿一批候选（状态正常 + 未删除 + 可选预算过滤）
     query_builder = db.query(Recipe).options(
@@ -216,39 +212,13 @@ def _db_keyword_fallback_recipes(
         )
     candidates = query_builder.limit(300).all()
 
-    # 关键词评分（支持 n-gram 近似匹配）
+    # 关键词评分（与 RAG 兜底共用一份实现；权重：标题 3.0 / 描述 1.0，n-gram 0.6 / 0.2）
     def calc_score(recipe) -> float:
-        title_low = (recipe.title or "").lower()
-        desc_low = (recipe.description or "").lower()
-        sc = 0.0
-        matched = set()
-        for tok in tokens:
-            t = tok.lower()
-            if not t:
-                continue
-            # 精确整词匹配（高权重）
-            if t in title_low:
-                sc += 3.0
-            if t in desc_low:
-                sc += 1.0
-            # n-gram 近似匹配（仅当整词未命中时）
-            if t not in title_low and t not in desc_low:
-                for n in (2, 3):
-                    if len(t) < n:
-                        continue
-                    for i in range(len(t) - n + 1):
-                        gram = t[i:i + n]
-                        if gram in matched:
-                            continue
-                        g_score = 0.0
-                        if gram in title_low:
-                            g_score += 0.6
-                        if gram in desc_low:
-                            g_score += 0.2
-                        if g_score > 0:
-                            matched.add(gram)
-                            sc += g_score
-        return sc
+        return keyword_match_score(
+            tokens,
+            exact_fields=[(recipe.title, 3.0), (recipe.description, 1.0)],
+            ngram_fields=[(recipe.title, 0.6), (recipe.description, 0.2)],
+        )
 
     scored = []
     for r in candidates:

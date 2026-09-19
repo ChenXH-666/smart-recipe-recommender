@@ -212,8 +212,8 @@ python import_data/eval_rerank.py --diagnose --out-prefix eval_scenario
 | 详情接口 N+1 修复 | `api/recipes.py` | commit 后重新预加载 tags/ingredients/steps/author，避免懒加载回潮 | 打开详情页，后端日志仅 3~4 条 SQL |
 | 向量同步后台化 | `services/rag_service.py` `sync_*_by_id` | 创建/编辑/审核菜谱、心得时的 Embedding 同步改 `BackgroundTasks`，不再阻塞响应 | 管理员审核通过菜谱应立即返回，向量同步随后完成 |
 | 查询改写按需触发 | `services/rag_service.py` `plan_query_rewrite` | 仅当查询与全库菜名无 3 字以上连续命中（如"快手家常菜"）时才调用一次 LLM 改写，已含实体词的查询零开销；提示词聚焦 1~2 个菜名（并列菜名过多会分散检索权重）；改写结果校验不过（幻觉菜名/丢预算）即回退原查询 | 发"清蒸鲈鱼的做法"无改写日志、发"减脂晚餐"有"查询改写生效"日志；改写链路失败时对话仍正常返回 |
-| 约束类查询跳过关键词通道 | `services/rag_service.py` `query_has_explicit_constraint` | 含预算/人数约束的查询（如"预算100元的东北菜家常菜""三个人吃的晚餐"）跳过 BM25 关键词通道、退化为纯向量召回——"东北""家常"等泛类别词的字面命中会挤占语义命中的位次（实测约束组 R@12 0.528→0.333，修复后恢复至 0.528、全量 R@12 0.483→0.512）；仅约束类查询受影响 | 发"预算100元的东北菜"有"约束类查询跳过关键词通道"日志；跑评测 `--modes vector,hybrid,hybrid_fix` 约束组指标回到向量基线 |
-| 精排打分查询融合改写文本 | `services/rag_service.py` `_effective_rerank_query` | 改写生效时精排打分查询取"原查询＋改写文本"拼接（未触发/回退仍用原查询）：口语化原查询会让交叉编码对相关菜给低分、压出前12（诊断为 0.57 分/终序19 → 改写文本 0.97 分/终序3）；生产默认全链路全量 R@12 0.529→0.671、场景意图型 0.133→0.500（5 条全部非零召回），类别/约束组同步提升、精确型持平；不新增外部调用与延迟 | 发"下班后30分钟搞定的快手家常菜"，日志显示精排生效；跑评测 `--modes hybrid_rw_fix,hybrid_rw_fix_rq,hybrid_rw_fix_rqm` 对比三档精排查询取法 |
+| 约束类查询跳过关键词通道 | `services/rag_service.py` `query_has_explicit_constraint` | 含预算/人数约束的查询（如"预算100元的东北菜家常菜""三个人吃的晚餐"）跳过 BM25 关键词通道、退化为纯向量召回——"东北""家常"等泛类别词的字面命中会挤占语义命中的位次（回退与修复效果见 `PRD.md` 5.4 节评测）；仅约束类查询受影响 | 发"预算100元的东北菜"有"约束类查询跳过关键词通道"日志；跑评测 `--modes vector,hybrid,hybrid_fix` 约束组指标回到向量基线 |
+| 精排打分查询融合改写文本 | `services/rag_service.py` `_effective_rerank_query` | 改写生效时精排打分查询取"原查询＋改写文本"拼接（未触发/回退仍用原查询）：口语化原查询会让交叉编码对相关菜给低分、压出前 12（诊断见论文 6.4.5 节②），拼接则同时保留菜名与类别词信号；不新增外部调用与延迟（前后指标见 `PRD.md` 5.4 节评测） | 发"下班后30分钟搞定的快手家常菜"，日志显示精排生效；跑评测 `--modes hybrid_rw_fix,hybrid_rw_fix_rq,hybrid_rw_fix_rqm` 对比三档精排查询取法 |
 | 会话列表摘要查询 | `api/users.py` `get_conversations` | 子查询只取首/末消息 ID + 批量取内容，不再 joinedload 全量消息 | 打开对话历史页，长会话也不慢 |
 | LLM 客户端单例 | `services/ai_service.py` `_get_llm` | 复用 `ChatOpenAI`（含 httpx 连接池），避免每轮重建握手 | 连续对话时首轮后无重建开销 |
 | 对话历史按需重载 | `api/ai.py` + `has_memory` | 仅内存缓存未命中时才查库重建，活跃会话零 DB 开销 | 连续对话不再每轮全量查历史 |

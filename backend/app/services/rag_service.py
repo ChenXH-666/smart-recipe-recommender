@@ -95,6 +95,7 @@ import chromadb
 from chromadb.config import Settings as ChromaSettings
 
 from app.config import get_settings
+from app.utils.text_match import keyword_match_score, tokenize_query
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -715,72 +716,16 @@ def _hybrid_search(
 
 def _keyword_match_score(query: str, content: str, title: str = "", tags: str = "") -> float:
     """
-    关键词匹配评分 —— 作为向量搜索失败时的兜底方案。
+    RAG 兜底检索的关键词打分（向量搜索失败时的兜底，见 _fallback_metadata_search）。
 
-    评分策略（越高越相关）：
-      - 标题命中（整词/长 n-gram）：+3.0/次
-      - 标签命中：+1.5/次
-      - 正文命中：+0.8/次
-      - 短 n-gram（2-3 字）部分命中：+0.3/次（用于处理"西红柿鸡蛋"与"西红柿炒鸡蛋"的近似匹配）
+    权重：整词命中 标题 3.0 / 标签 1.5 / 正文 0.8；2~3 字 n-gram 近似命中 0.6 / 0.3 / 0.15。
+    打分逻辑与推荐侧兜底共用一份（app/utils/text_match.py），仅字段与权重不同。
     """
-    if not query:
-        return 0.0
-
-    # 去除常见停用词和标点
-    import re
-    stopwords = {"推荐", "帮", "我", "的", "一个", "点", "些", "想", "要", "吃", "做", "个",
-                 "便宜", "好吃", "简单", "来点", "今天", "请问", "有没有", "有什么"}
-    raw_tokens = [t for t in re.split(r"[\s，。、；：,.;:!?()（）\[\]【】\"'《》]+", query) if t]
-    tokens = [t for t in raw_tokens if t and t not in stopwords]
-    if not tokens:
-        tokens = raw_tokens or [query]
-
-    title_low = title.lower()
-    tags_low = tags.lower()
-    content_low = content.lower()
-
-    score = 0.0
-    matched_ngrams = set()
-
-    for tok in tokens:
-        t = tok.lower()
-        if not t or len(t) == 0:
-            continue
-
-        # 精确整词匹配（最高权重）
-        exact_in_title = t in title_low
-        exact_in_tags = t in tags_low
-        exact_in_content = t in content_low
-
-        if exact_in_title:
-            score += 3.0
-        if exact_in_tags:
-            score += 1.5
-        if exact_in_content:
-            score += 0.8
-
-        # 字符级 n-gram 部分匹配 —— 处理"西红柿鸡蛋" ≈ "西红柿炒鸡蛋" 这种情况
-        # 提取所有 2-3 字 n-gram 作为模糊匹配特征
-        if not (exact_in_title or exact_in_tags or exact_in_content):
-            for n in (2, 3):
-                if len(t) < n:
-                    continue
-                for i in range(len(t) - n + 1):
-                    gram = t[i:i + n]
-                    if gram in matched_ngrams:
-                        continue
-                    gram_score = 0.0
-                    if gram in title_low:
-                        gram_score += 0.6
-                    if gram in tags_low:
-                        gram_score += 0.3
-                    if gram in content_low:
-                        gram_score += 0.15
-                    if gram_score > 0:
-                        matched_ngrams.add(gram)
-                        score += gram_score
-
-    return score
+    return keyword_match_score(
+        tokenize_query(query),
+        exact_fields=[(title, 3.0), (tags, 1.5), (content, 0.8)],
+        ngram_fields=[(title, 0.6), (tags, 0.3), (content, 0.15)],
+    )
 
 
 def _fallback_metadata_search(
@@ -846,8 +791,7 @@ _REWRITE_MAX_CHARS = 80
 
 # 改写提示词 —— 目标是"检索表达"而非回答：聚焦具体菜名、保留约束、控制长度。
 # 并列菜名过多会分散 embedding/BM25 权重（诊断：4 菜名并列时相关菜在改写路召回仅 21 名，
-# 融合后被挤出候选池）；对照实验 1~2 / 2~3 两档聚焦程度后采用 1~2（场景组 R@12 0.600、
-# 全量 0.738 均为最高，类别组相对修复前 R@12/NDCG 仍升、MRR -0.028 属抖动量级）
+# 融合后被挤出候选池）；对照 1~2 与 2~3 两档聚焦程度后采用 1~2（消融见论文 6.4.5 节④）
 _REWRITE_SYSTEM_PROMPT = (
     "你是菜谱检索系统的查询改写助手。用户会给你一句口语化的找菜需求（通常不含具体菜名），"
     "请把它改写为一条以具体菜名为主的检索短语句：聚焦 1~2 个中国家庭常见、菜谱库中很可能"
@@ -1042,7 +986,7 @@ def _merge_ranked_results(primary: List[Dict], secondary: List[Dict], top_k: int
 # 约束类查询判定：含明确预算金额（"预算100元""300块以内"）或用餐人数（"三个人""5人份"）
 # 的查询。这类查询的检索信号在约束条件本身而非字面词项——BM25 关键词通道只会对
 # "东北""家常"等泛类别词大面积字面命中，把同类无关菜推入前排、经 RRF 融合后挤掉
-# 向量通道语义命中的确切菜谱（评测：约束组 R@12 0.528→0.333 的回退即此成因）。
+# 向量通道语义命中的确切菜谱（评测：约束组 R@12 明显回退即此成因，见 PRD.md 5.4 节）。
 # 故约束类查询跳过关键词通道、退化为纯向量召回（RAG_HYBRID_CONSTRAINT_SKIP_KEYWORD）。
 # 预算判定复用 _extract_budget 的严格正则（"5块排骨"等量词不误判、"30分钟"等时长不触发）。
 # 判定基于查询文本，对改写查询同样成立的前提是"改写文本仍含该约束"：预算金额在
