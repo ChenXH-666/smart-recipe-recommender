@@ -154,6 +154,25 @@ class TestPlanQueryRewrite:
         assert rag.plan_query_rewrite(self.QUERY) is None
 
 
+# ------------------------------ 精排打分查询选择 ------------------------------
+
+class TestEffectiveRerankQuery:
+    """拼接式精排：改写生效且配置开启时用「原查询＋改写文本」，否则一律回退原查询。"""
+
+    def test_merged_used_when_enabled(self, monkeypatch):
+        monkeypatch.setattr(rag.settings, "RAG_RERANK_QUERY_REWRITE", True)
+        assert rag._effective_rerank_query(
+            "下班做什么菜", "西红柿炒鸡蛋") == "下班做什么菜 西红柿炒鸡蛋"
+
+    def test_original_kept_when_disabled(self, monkeypatch):
+        monkeypatch.setattr(rag.settings, "RAG_RERANK_QUERY_REWRITE", False)
+        assert rag._effective_rerank_query(
+            "下班做什么菜", "西红柿炒鸡蛋") == "下班做什么菜"
+
+    def test_original_kept_without_rewrite(self):
+        assert rag._effective_rerank_query("下班做什么菜", None) == "下班做什么菜"
+
+
 # ------------------------------ 双查询召回 RRF 融合 ------------------------------
 
 def _hit(rid: int, content: str = None):

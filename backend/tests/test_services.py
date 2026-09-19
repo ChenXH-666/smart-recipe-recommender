@@ -50,10 +50,15 @@ class TestExtractBudget:
 
 @pytest.fixture()
 def _patch_retrieval(monkeypatch):
-    """屏蔽真实检索与精排：默认空召回、空兜底、精排降级（返回 None）。"""
+    """屏蔽真实检索与精排：默认空召回、空兜底、精排降级（返回 None）。
+
+    plan_query_rewrite 同样打桩返回 None（未触发改写）：生产链路在池构建前会先
+    规划改写（供精排选用改写文本打分），不打桩会触达真实 Chroma / LLM。
+    """
     monkeypatch.setattr(rag, "rag_search", lambda *a, **k: [])
     monkeypatch.setattr(rag, "_get_popular_recipe_ids", lambda *a, **k: [])
     monkeypatch.setattr(rag, "_rerank_pool_scores", lambda *a, **k: None)
+    monkeypatch.setattr(rag, "plan_query_rewrite", lambda q: None)
 
 
 def _recipe(db, title, cost=None, tags=None, ings=None):
@@ -305,6 +310,45 @@ class TestRerankInRecipePool:
         # 精排分高的中档菜(80)没有借 α=0 改变组内成本升序
         assert body.index("经济菜") < body.index("中档菜")
         assert "90~100 元" in body
+
+    # ---- 改写式精排：精排打分查询取改写文本（场景查询修复）----
+
+    def _capture_pool_build(self, db_session, monkeypatch, rewritten, query):
+        """跑一次池构建并捕获 rag_search 参数与精排查询（不触真实检索/LLM）。"""
+        captured = {}
+        r1 = _recipe(db_session, "西红柿炒鸡蛋", cost=12)
+        r2 = _recipe(db_session, "清蒸鲈鱼", cost=40)
+
+        def _fake_search(q, **kwargs):
+            captured.update(kwargs)
+            return [{"source_id": r1.id}, {"source_id": r2.id}]
+
+        def _fake_rerank(q, pool, recipes):
+            captured["rerank_query"] = q
+            return None
+
+        monkeypatch.setattr(rag, "plan_query_rewrite", lambda q: rewritten)
+        monkeypatch.setattr(rag, "rag_search", _fake_search)
+        monkeypatch.setattr(rag, "_rerank_pool_scores", _fake_rerank)
+        rag.build_recipe_pool_context(db_session, query, restriction_set=set())
+        return captured
+
+    def test_rerank_uses_merged_query_when_active(self, db_session, _patch_retrieval, monkeypatch):
+        # 改写生效 + 配置开启：改写文本注入 rag_search（rewrite=False 不二次触发 LLM），
+        # 精排打分查询用「原查询＋改写文本」拼接（保留类别词信号）
+        monkeypatch.setattr(rag.settings, "RAG_RERANK_QUERY_REWRITE", True)
+        cap = self._capture_pool_build(
+            db_session, monkeypatch, "西红柿炒鸡蛋", "下班做什么快手菜")
+        assert cap["rewritten_query"] == "西红柿炒鸡蛋"
+        assert cap["rewrite"] is False
+        assert cap["rerank_query"] == "下班做什么快手菜 西红柿炒鸡蛋"
+
+    def test_rerank_keeps_original_when_no_rewrite(self, db_session, _patch_retrieval, monkeypatch):
+        # 未触发/改写失败：精排仍用原查询，行为与旧链路一致
+        cap = self._capture_pool_build(
+            db_session, monkeypatch, None, "潮汕年夜饭")
+        assert cap["rewritten_query"] is None
+        assert cap["rerank_query"] == "潮汕年夜饭"
 
 
 # ------------------------------ AI 对话引擎 ------------------------------

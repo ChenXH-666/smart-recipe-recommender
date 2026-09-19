@@ -97,6 +97,8 @@ api_example/
 # 检索评测本地实验产物（依赖在线 API，机器相关）
 backend/import_data/eval_*_results.md
 backend/import_data/eval_*_results.json
+backend/import_data/eval_*_diagnose.md
+backend/import_data/eval_*_diagnose.json
 
 # 接口性能基准本地实验产物（机器相关）
 backend/import_data/bench_*.md

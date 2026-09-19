@@ -7,12 +7,15 @@ Rerank 精排评测脚本 v6 —— 论文实验：召回模式（向量/混合/
                   hybrid: 混合召回（向量+BM25，RRF 融合）,
                   hybrid_fix: 混合召回 + 约束类查询跳过关键词通道（修复约束组回退）,
                   hybrid_rw: 混合召回 + 查询改写（无实体词查询经 LLM 改写后双查询召回 RRF 融合）,
-                  hybrid_rw_fix: 混合召回 + 查询改写 + 约束跳过（生产默认全链路）}
+                  hybrid_rw_fix: 混合召回 + 查询改写 + 约束跳过（修复约束组回退）,
+                  hybrid_rw_fix_rq: 混合召回 + 查询改写 + 约束跳过 + 改写式精排（精排查询=改写文本，消融对照）,
+                  hybrid_rw_fix_rqm: 混合召回 + 查询改写 + 约束跳过 + 拼接式精排（精排查询=原查询＋改写文本，生产默认全链路）}
       α ∈ {0, 0.3, 0.5, 0.7, 1.0}，α=0 即纯召回排序基线，α=1 即纯精排消融，中间为融合。
   - 同分复用：每条查询每个召回模式只调 1 次 Rerank API，各 α 在本地重算（控制成本与抖动）；
     查询改写同样每条查询只调 1 次 LLM，所有模式共用同一改写结果；
     不同召回模式产出**相同候选池**时复用同一份精排结果（如约束跳过模式与纯向量模式
-    在约束查询上池完全一致），避免精排 API 抖动污染对照（同分复用原则的延伸）。
+    在约束查询上池完全一致），避免精排 API 抖动污染对照（同分复用原则的延伸）；
+    改写式精排（_rq 模式）因精排查询不同，与其它模式不复用。
   - 分层汇报：全量平均 + 命中子集（相关菜已进候选池的查询）+ 按查询类型分组，
     把"第一级召回失败"与"排序质量差"两类问题分开。
   - 论文输出：结果同时打印并保存为 Markdown（可直接粘进论文）与 JSON（复算用），
@@ -32,6 +35,9 @@ Rerank 精排评测脚本 v6 —— 论文实验：召回模式（向量/混合/
                                                               # 约束回退修复对照实验
     python import_data/eval_rerank.py --modes hybrid,hybrid_rw --out-prefix eval_rewrite
                                                               # 混合召回 vs 查询改写对照
+    python import_data/eval_rerank.py --diagnose --out-prefix eval_scenario
+                                                              # 阶段诊断：逐条输出相关菜在通道/
+                                                              # 单查询RRF/双查询融合/池/精排的名次
     python import_data/eval_rerank.py --out-prefix eval_hybrid  # 指定输出文件名前缀
 
 评测集格式（category ∈ exact/cuisine/scenario/budget）：
@@ -58,6 +64,10 @@ from app.database import SessionLocal
 from app.models import Recipe
 from app.services.rag_service import (
     rag_search,
+    get_vectorstore,
+    _single_query_recall,
+    _merge_ranked_results,
+    _bm25_keyword_search,
     _rerank_pool_scores,
     _fusion_sorted_pool,
     _get_popular_recipe_ids,
@@ -82,16 +92,24 @@ DEFAULT_ALPHAS = [0.0, 0.3, 0.5, 0.7, 1.0]
 # 召回模式：vector=纯向量（原链路），hybrid=混合召回（向量+BM25，RRF 融合），
 # hybrid_fix=混合召回+约束类查询跳过关键词通道（修复约束组回退），
 # hybrid_rw=混合召回+查询改写（改写查询与原查询双路召回，RRF 融合），
-# hybrid_rw_fix=混合召回+查询改写+约束跳过（生产默认全链路）
-DEFAULT_MODES = ["vector", "hybrid", "hybrid_rw", "hybrid_fix", "hybrid_rw_fix"]
+# hybrid_rw_fix=混合召回+查询改写+约束跳过（生产默认全链路），
+# hybrid_rw_fix_rq=精排打分查询取改写文本（消融对照），
+# hybrid_rw_fix_rqm=精排打分查询取「原查询＋改写文本」拼接（场景查询修复，生产默认）
+DEFAULT_MODES = ["vector", "hybrid", "hybrid_rw", "hybrid_fix", "hybrid_rw_fix",
+                 "hybrid_rw_fix_rq", "hybrid_rw_fix_rqm"]
 
 # 模式 → rag_search 参数（skip_kw_constraint 显式传入保证对照不受环境配置影响）
+# rerank_query：精排打分查询来源——"rewritten"=改写文本（消融）、"merged"=原查询＋改写文本（生产）
 MODE_CONFIG = {
     "vector": {"hybrid": False},
     "hybrid": {"hybrid": True, "skip_kw_constraint": False},
     "hybrid_fix": {"hybrid": True, "skip_kw_constraint": True},
     "hybrid_rw": {"hybrid": True, "skip_kw_constraint": False, "rewrite": True},
     "hybrid_rw_fix": {"hybrid": True, "skip_kw_constraint": True, "rewrite": True},
+    "hybrid_rw_fix_rq": {"hybrid": True, "skip_kw_constraint": True, "rewrite": True,
+                         "rerank_query": "rewritten"},
+    "hybrid_rw_fix_rqm": {"hybrid": True, "skip_kw_constraint": True, "rewrite": True,
+                          "rerank_query": "merged"},
 }
 
 CATEGORY_CN = {
@@ -107,6 +125,8 @@ MODE_CN = {
     "hybrid_fix": "混合召回+约束跳过（修复）",
     "hybrid_rw": "混合召回+查询改写（双查询 RRF）",
     "hybrid_rw_fix": "混合召回+查询改写+约束跳过",
+    "hybrid_rw_fix_rq": "混合召回+查询改写+约束跳过+改写式精排",
+    "hybrid_rw_fix_rqm": "混合召回+查询改写+约束跳过+拼接式精排",
 }
 
 
@@ -193,9 +213,15 @@ def get_base_pool(query: str, db, hybrid: bool = False, rewritten_query: str = N
                 break
 
     # 与生产一致预加载标签/食材链路，避免精排文档构建时的 N+1 惰性查询
+    recipes = _load_recipes(db, pool)
+    return pool, recipes
+
+
+def _load_recipes(db, pool: list) -> dict:
+    """按池内 ID 预加载菜谱对象（joinedload 标签/食材链路，避免精排文档构建 N+1）"""
     from app.models import RecipeTag, RecipeIngredient
     from sqlalchemy.orm import joinedload, selectinload
-    recipes = {
+    return {
         r.id: r for r in db.query(Recipe)
         .options(
             joinedload(Recipe.tags).joinedload(RecipeTag.tag),
@@ -204,15 +230,17 @@ def get_base_pool(query: str, db, hybrid: bool = False, rewritten_query: str = N
         .filter(Recipe.id.in_(pool))
         .all()
     }
-    return pool, recipes
 
 
-def finalize_pool(query: str, pool: list, recipes: dict, scores, alpha: float) -> list:
+def finalize_pool(query: str, pool: list, recipes: dict, scores, alpha: float,
+                  limit: int = None) -> list:
     """第二级（按指定 α）：分数融合 → 预算分组 → 截断前 K（与生产一致）。
 
     生产分支语义：融合生效（有分数且 α>0）→ 预算分组组内保持融合相关度序；
     未融合（scores 为 None 或 α=0）→ 组内按成本升序（与生产基线一致，
     保证实验 α=0 行完全等于"关闭精排"的线上行为）。
+
+    limit 缺省取生产上限 RAG_CHAT_MAX_DISHES；诊断模式传 len(pool) 可拿未截断全序。
     """
     applied = bool(scores) and alpha > 0
     p = pool
@@ -232,7 +260,198 @@ def finalize_pool(query: str, pool: list, recipes: dict, scores, alpha: float) -
         else:
             p = sorted(in_ids, key=_cost) + sorted(over_ids, key=_cost)
 
-    return p[: settings.RAG_CHAT_MAX_DISHES]
+    return p[: (limit if limit is not None else settings.RAG_CHAT_MAX_DISHES)]
+
+
+# ------------------------------ 阶段诊断（--diagnose） ------------------------------
+
+def _recipe_rank(results: list, rid: int) -> int:
+    """有序结果中目标菜谱「按菜谱去重」后的名次（1 起；未出现返回 0）"""
+    seen, rank = set(), 0
+    for r in results:
+        sid = r.get("source_id")
+        if not sid or sid in seen:
+            continue
+        seen.add(sid)
+        rank += 1
+        if sid == rid:
+            return rank
+    return 0
+
+
+def _chunk_rank(results: list, rid: int) -> int:
+    """有序结果中目标菜谱首个分块的名次（chunk 级，1 起；未出现返回 0）"""
+    for i, r in enumerate(results, 1):
+        if r.get("source_id") == rid:
+            return i
+    return 0
+
+
+def _fmt_rank(v: int) -> str:
+    return str(v) if v else "—"
+
+
+def _fmt_score(scores, pool: list, rid: int) -> str:
+    if rid not in pool:
+        return "—"
+    if not scores:
+        return "降级"
+    s = scores.get(rid)
+    return f"{s:.4f}" if s is not None else "未打分(>32)"
+
+
+def _vector_channel_results(vs, query: str, top_k: int) -> list:
+    """向量通道原始结果（与 _hybrid_search 内调用一致，供通道级名次诊断）"""
+    try:
+        docs = vs.similarity_search(query, k=top_k, filter={"source_type": "recipe"})
+    except Exception as e:
+        logger.error(f"诊断-向量通道失败: {e}")
+        return []
+    return [
+        {
+            "content": d.page_content,
+            "source_type": (d.metadata or {}).get("source_type", ""),
+            "source_id": (d.metadata or {}).get("source_id", 0),
+        }
+        for d in docs
+    ]
+
+
+def run_diagnose(db, args, cases: list, id2title: dict, title2id: dict, k: int) -> None:
+    """
+    逐阶段诊断（只读）：还原每道相关菜在检索链路中的名次变化路径——
+    向量/BM25 通道 → 单查询 RRF → 双查询融合（未截断全序）→ 40 池去重 →
+    精排（原查询 / 改写查询两种打分视角）→ 融合终序（α=0.5）。
+
+    复用生产同款函数、不改生产代码：单查询召回用 _single_query_recall，
+    双查询融合用 _merge_ranked_results（top_k 放大到 10**6 即得生产截断前的全序）。
+    名次均为「按菜谱去重」后的菜谱级名次（融合列另附 chunk 级名次），
+    定位"相关菜在哪一步丢失"（通道漏召 / 融合挤占 / 池截断 / 精排未打分）。
+    结果落盘 {out_prefix}_diagnose.md/.json。
+    """
+    vs = get_vectorstore()
+    recall_k = settings.RAG_CHAT_RECALL_K
+    alpha = 0.5
+    records = []
+    lines = [
+        f"# 检索阶段诊断（自动生成：{datetime.now().strftime('%Y-%m-%d %H:%M')}）",
+        "",
+        f"生产链路复现：混合召回（向量+BM25，RRF k={settings.RAG_HYBRID_RRF_K}）"
+        f"＋约束跳过（读配置）＋查询改写（触发才调 LLM）；召回上限 {recall_k} 分块、"
+        f"精排上限 {settings.RERANK_MAX_CANDIDATES} 道、终序 α={alpha}。",
+        "名次口径：除「融合全序」列注明 chunk 级外，其余均为按菜谱去重后的菜谱级名次"
+        "（chunk=同菜多分块未折叠；菜谱=折叠后）；「—」=该阶段未出现。",
+        "",
+    ]
+
+    for case in cases:
+        query = case["query"]
+        category = case.get("category", "")
+        relevant_ids = []
+        for title in case.get("relevant_titles", []):
+            rid = title2id.get(title)
+            if rid is None:
+                logger.warning(f"诊断标注菜名不在库内，已忽略：{title}")
+            else:
+                relevant_ids.append(rid)
+        if not relevant_ids:
+            continue
+
+        triggered = not query_has_library_entity(query)
+        rewritten = plan_query_rewrite(query)
+
+        primary = _single_query_recall(vs, query, recall_k, "recipe", True)
+        secondary = (
+            _single_query_recall(vs, rewritten, recall_k, "recipe", True)
+            if rewritten else []
+        )
+        v_primary = _vector_channel_results(vs, query, recall_k)
+        kw_primary = _bm25_keyword_search(vs, query, recall_k, "recipe")
+        v_secondary = _vector_channel_results(vs, rewritten, recall_k) if rewritten else []
+        kw_secondary = (
+            _bm25_keyword_search(vs, rewritten, recall_k, "recipe") if rewritten else []
+        )
+
+        # 双查询融合：生产在融合后即截断 recall_k，此处放大 top_k 取未截断全序
+        fused_full = (
+            _merge_ranked_results(primary, secondary, 10 ** 6) if secondary else primary
+        )
+        pool, seen = [], set()
+        for r in fused_full[:recall_k]:
+            rid = r.get("source_id")
+            if rid and rid not in seen:
+                seen.add(rid)
+                pool.append(rid)
+
+        recipes = _load_recipes(db, pool)
+        scores_orig = _rerank_pool_scores(query, pool, recipes)
+        scores_rw = _rerank_pool_scores(rewritten, pool, recipes) if rewritten else None
+        order_orig = finalize_pool(query, pool, recipes, scores_orig, alpha, limit=len(pool))
+        order_rw = (
+            finalize_pool(query, pool, recipes, scores_rw, alpha, limit=len(pool))
+            if scores_rw else []
+        )
+
+        dishes = []
+        for rid in relevant_ids:
+            dishes.append({
+                "recipe_id": rid,
+                "title": id2title.get(rid, f"#{rid}"),
+                "orig_vector": _recipe_rank(v_primary, rid),
+                "orig_bm25": _recipe_rank(kw_primary, rid),
+                "orig_rrf": _recipe_rank(primary, rid),
+                "rw_vector": _recipe_rank(v_secondary, rid),
+                "rw_bm25": _recipe_rank(kw_secondary, rid),
+                "rw_rrf": _recipe_rank(secondary, rid),
+                "fused_chunk": _chunk_rank(fused_full, rid),
+                "fused_recipe": _recipe_rank(fused_full, rid),
+                "pool": pool.index(rid) + 1 if rid in pool else 0,
+                "rerank_orig": scores_orig.get(rid) if scores_orig else None,
+                "rerank_rw": scores_rw.get(rid) if scores_rw else None,
+                "final_orig": order_orig.index(rid) + 1 if rid in order_orig else 0,
+                "final_rw": order_rw.index(rid) + 1 if rid in order_rw else 0,
+            })
+
+        records.append({
+            "query": query, "category": category, "triggered": triggered,
+            "rewritten": rewritten, "dishes": dishes,
+        })
+
+        hits = sum(1 for d in dishes if 0 < d["final_orig"] <= k)
+        lines += [
+            f"## 查询「{query}」",
+            "",
+            f"- 类型：{category}；改写触发：{'是' if triggered else '否'}；"
+            f"改写文本：{rewritten or '—'}",
+            f"- 相关菜进入最终前 {k}：{hits}/{len(dishes)}",
+            "",
+            "| 相关菜 | 原·向量 | 原·BM25 | 原·单RRF | 改写·向量 | 改写·BM25 | 改写·单RRF | "
+            "融合全序 chunk/菜谱 | 40池 | 精排(原) | 精排(改写) | 终序α=.5(原) | 终序α=.5(改写) |",
+            "|---|---|---|---|---|---|---|---|---|---|---|---|---|",
+        ]
+        for d in dishes:
+            rid = d["recipe_id"]
+            lines.append(
+                f"| {d['title']} | {_fmt_rank(d['orig_vector'])} | {_fmt_rank(d['orig_bm25'])} | "
+                f"{_fmt_rank(d['orig_rrf'])} | {_fmt_rank(d['rw_vector'])} | "
+                f"{_fmt_rank(d['rw_bm25'])} | {_fmt_rank(d['rw_rrf'])} | "
+                f"{_fmt_rank(d['fused_chunk'])}/{_fmt_rank(d['fused_recipe'])} | "
+                f"{_fmt_rank(d['pool'])} | {_fmt_score(scores_orig, pool, rid)} | "
+                f"{_fmt_score(scores_rw, pool, rid)} | {_fmt_rank(d['final_orig'])} | "
+                f"{_fmt_rank(d['final_rw'])} |"
+            )
+        lines.append("")
+
+    diag_md = Path(__file__).parent / f"{args.out_prefix}_diagnose.md"
+    diag_json = Path(__file__).parent / f"{args.out_prefix}_diagnose.json"
+    text = "\n".join(lines)
+    print(text)
+    diag_md.write_text(text, encoding="utf-8")
+    diag_json.write_text(
+        json.dumps({"records": records}, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    print(f"诊断结果已保存：{diag_md}\n               {diag_json}\n")
 
 
 # ------------------------------ 输出渲染 ------------------------------
@@ -368,17 +587,22 @@ def main():
     parser.add_argument("--modes", type=str, default=",".join(DEFAULT_MODES),
                         help="逗号分隔的召回模式（vector=纯向量，hybrid=混合+RRF，"
                              "hybrid_fix=混合+约束跳过，hybrid_rw=混合+查询改写，"
-                             "hybrid_rw_fix=混合+查询改写+约束跳过；默认全模式）")
+                             "hybrid_rw_fix=混合+查询改写+约束跳过，"
+                             "hybrid_rw_fix_rq=精排查询取改写文本，"
+                             "hybrid_rw_fix_rqm=精排查询取原查询＋改写文本；默认全模式）")
     parser.add_argument("--out-prefix", type=str, default="eval_rerank",
                         help="结果文件名前缀（约束修复实验建议 eval_constraint，"
                              "改写实验建议 eval_rewrite，避免覆盖旧结果）")
+    parser.add_argument("--diagnose", action="store_true",
+                        help="阶段诊断模式：逐条输出相关菜在通道/单查询RRF/双查询融合/池/精排各阶段的"
+                             "名次，落盘 {out_prefix}_diagnose.md/.json（不含指标汇总）")
     args = parser.parse_args()
     alphas = [float(x) for x in args.alphas.split(",") if x.strip() != ""]
     modes = [m.strip() for m in args.modes.split(",") if m.strip()]
     for m in modes:
         if m not in MODE_CN:
             parser.error(f"未知召回模式：{m}（可选 vector / hybrid / hybrid_fix / "
-                         f"hybrid_rw / hybrid_rw_fix）")
+                         f"hybrid_rw / hybrid_rw_fix / hybrid_rw_fix_rq / hybrid_rw_fix_rqm）")
 
     db = SessionLocal()
     try:
@@ -399,6 +623,9 @@ def main():
 
         cases = load_cases(Path(args.cases))
         k = args.k
+        if args.diagnose:
+            run_diagnose(db, args, cases, id2title, title2id, k)
+            return
         keys = [(m, a) for m in modes for a in alphas]
         print(f"\n评测集：{len(cases)} 条查询 | 截断 K={k} | 召回模式：{modes} | "
               f"α 扫描：{alphas} | 精排模型：{settings.RERANK_MODEL}\n")
@@ -406,7 +633,7 @@ def main():
         all_rows = []          # 每条 (query, category, mode, alpha, metrics)
         rerank_fail = 0        # 精排未生效（降级）的 (查询, 模式) 数
         rerank_reused = 0      # 同池复用精排分次数（不重复调 API）
-        scores_cache = {}      # (query, pool) → 精排分数，同池复用避免 API 抖动污染对照
+        scores_cache = {}      # (query, 精排查询, pool) → 精排分数，同查询同池复用避免 API 抖动污染对照
         cat_stat = {c: 0 for c in CATEGORY_CN}
         # 池级命中：相关菜是否进入【截断前】候选池（与 α 无关，按召回模式分别判定）
         pool_hit_queries = {m: set() for m in modes}
@@ -457,12 +684,22 @@ def main():
                 )
                 if set(pool) & relevant_ids:
                     pool_hit_queries[mode].add(query)
-                pool_key = (query, tuple(pool))
+                # 精排打分查询：rewritten=仅改写文本；merged=原查询+改写文本拼接
+                # （保留类别词信号，避免精排被聚焦的 1~2 个菜名主导）；其余用原查询。
+                # 缓存键含精排查询与候选池，同查询同池才复用（消抖）
+                rq_mode = cfg.get("rerank_query")
+                if rq_mode == "rewritten" and rewritten:
+                    rerank_q = rewritten
+                elif rq_mode == "merged" and rewritten:
+                    rerank_q = f"{query} {rewritten}"
+                else:
+                    rerank_q = query
+                pool_key = (query, rerank_q, tuple(pool))
                 if pool_key in scores_cache:
                     scores = scores_cache[pool_key]
                     rerank_reused += 1
                 else:
-                    scores = _rerank_pool_scores(query, pool, recipes)
+                    scores = _rerank_pool_scores(rerank_q, pool, recipes)
                     scores_cache[pool_key] = scores
                 if not scores:
                     rerank_fail += 1
@@ -504,12 +741,18 @@ def main():
               f"{REWRITE_MIN_ENTITY_LEN} 字以上连续命中）。",
             f"融合公式：最终分 = α×精排分 + (1−α)×召回位置分。",
         ]
-        if any(m.endswith("_fix") for m in modes):
+        if any("_fix" in m for m in modes):
             md.append(
                 "约束跳过（修复）：含预算金额/用餐人数的查询（"
                 "query_has_explicit_constraint 判定）在混合召回中跳过 BM25 关键词通道、"
                 "退化为纯向量召回（RAG_HYBRID_CONSTRAINT_SKIP_KEYWORD）；"
                 "改写查询同样含该约束时一并跳过。"
+            )
+        if any(m.endswith("_rq") or m.endswith("_rqm") for m in modes):
+            md.append(
+                "改写式精排（场景查询修复）：改写生效时精排打分查询取改写文本（_rq）或"
+                "「原查询＋改写文本」拼接（_rqm）而非原查询（未触发/回退仍用原查询）"
+                "——口语化原查询会让交叉编码给相关菜低分、压出前 K（RAG_RERANK_QUERY_REWRITE）。"
             )
         md += [
             "",

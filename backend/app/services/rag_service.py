@@ -854,15 +854,19 @@ _TITLE_NGRAM_MAX = 12
 # 改写结果长度上限（字符）：检索表达宜短，超长说明模型跑题（输出解释/整段菜单）
 _REWRITE_MAX_CHARS = 80
 
-# 改写提示词 —— 目标是"检索表达"而非回答：补全实体词、保留约束、控制长度
+# 改写提示词 —— 目标是"检索表达"而非回答：聚焦具体菜名、保留约束、控制长度。
+# 并列菜名过多会分散 embedding/BM25 权重（诊断：4 菜名并列时相关菜在改写路召回仅 21 名，
+# 融合后被挤出候选池）；对照实验 1~2 / 2~3 两档聚焦程度后采用 1~2（场景组 R@12 0.600、
+# 全量 0.738 均为最高，类别组相对修复前 R@12/NDCG 仍升、MRR -0.028 属抖动量级）
 _REWRITE_SYSTEM_PROMPT = (
     "你是菜谱检索系统的查询改写助手。用户会给你一句口语化的找菜需求（通常不含具体菜名），"
-    "请把它改写为一条更适合检索的短语句：补充 2~4 个中国家庭常见、菜谱库中很可能存在的"
-    "具体菜名或主食材（如“西红柿炒鸡蛋”“清蒸鲈鱼”），保留原句中的口味、场景、忌口、"
+    "请把它改写为一条以具体菜名为主的检索短语句：聚焦 1~2 个中国家庭常见、菜谱库中很可能"
+    "存在的具体菜名或主食材（如“西红柿炒鸡蛋”“清蒸鲈鱼”），保留原句中的口味、场景、忌口、"
     "预算金额、人数等约束信息。要求：\n"
     "1. 只输出改写后的检索语句本身（一行，不超过 60 字），不要解释、不要编号、不要 Markdown；\n"
-    "2. 原句中的预算等数值（如“预算100元”）必须原样保留；\n"
-    "3. 不要输出生僻菜品，优先大众家常菜名。"
+    "2. 菜名宜少而准：并列菜名越多越会分散检索权重，只列 1~2 个最贴合的菜名，不要罗列清单；\n"
+    "3. 原句中的预算等数值（如“预算100元”）必须原样保留；\n"
+    "4. 不要输出生僻菜品，优先大众家常菜名。"
 )
 
 
@@ -996,6 +1000,24 @@ def plan_query_rewrite(query: str) -> Optional[str]:
     except Exception as e:
         logger.warning(f"查询改写失败，回退原查询: {e}")
         return None
+
+
+def _effective_rerank_query(query: str, rewritten: Optional[str]) -> str:
+    """
+    精排打分用的查询文本：改写生效且 RAG_RERANK_QUERY_REWRITE 开启时，用
+    「原查询 ＋ 改写文本」拼接（否则一律用原查询）。
+
+    动机（阶段诊断证据）：口语化原查询会让交叉编码器对真正相关的菜给出偏低分——
+    "下班后30分钟搞定的快手家常菜"的相关菜 西红柿炒鸡蛋 用原查询打 0.57（终序 19）、
+    用含菜名的改写文本打 0.97（终序 3）；改写文本提供菜名字面/语义匹配信号。
+
+    为何拼接而非只用改写文本：改写聚焦 1~2 个菜名后，若精排只看改写文本，类别型
+    查询会被这几个菜名主导、其余同类菜被压低（评测：类别组 MRR 0.583→0.500）；
+    保留原查询（含"潮汕""川菜"等类别词）可兼顾两侧，评测中所有分组均无退化。
+    """
+    if rewritten and settings.RAG_RERANK_QUERY_REWRITE:
+        return f"{query} {rewritten}"
+    return query
 
 
 def _merge_ranked_results(primary: List[Dict], secondary: List[Dict], top_k: int) -> List[Dict]:
@@ -1398,8 +1420,13 @@ def build_recipe_pool_context(
         max_dishes = settings.RAG_CHAT_MAX_DISHES
     recall_k = settings.RAG_CHAT_RECALL_K
 
+    # 查询改写前置到池构建（改写文本随后用作精排打分查询，见 _effective_rerank_query）；
+    # 结果注入 rag_search 并置 rewrite=False，避免其内部重复触发一次 LLM 调用
+    rewritten_query = plan_query_rewrite(query) if settings.RAG_QUERY_REWRITE else None
+
     # ---- 1) 候选池：向量召回 + 热门兜底补足（①②）----
-    results = rag_search(query, top_k=recall_k, filter_source_type="recipe")
+    results = rag_search(query, top_k=recall_k, filter_source_type="recipe",
+                         rewrite=False, rewritten_query=rewritten_query)
     pool: List[int] = []
     seen: set = set()
     for r in results:
@@ -1435,7 +1462,9 @@ def build_recipe_pool_context(
         .filter(Recipe.id.in_(pool))
         .all()
     }
-    rerank_scores = _rerank_pool_scores(query, pool, recipes)
+    rerank_scores = _rerank_pool_scores(
+        _effective_rerank_query(query, rewritten_query), pool, recipes
+    )
     # fusion_applied：精排拿到分数且权重 > 0 才算融合生效。
     # α=0 时即使精排成功也不改变排序（含预算组内成本升序），保证
     # "RERANK_ALPHA=0" 与 "关闭精排" 的链路行为完全一致（评测基线可比）。

@@ -198,6 +198,11 @@ class Settings(BaseSettings):
     # 改写结果须含库内真实菜名、保留预算金额（硬校验仅覆盖预算），否则静默回退原查询。
     RAG_QUERY_REWRITE: bool = True
     RAG_QUERY_REWRITE_TIMEOUT: int = 10      # 改写 LLM 调用超时（秒），超时回退原查询
+    # 精排打分查询：改写生效时用「原查询＋改写文本」拼接打分（未触发/回退仍用原查询）。
+    # 口语化原查询会让交叉编码对相关菜给低分、压出前 K（阶段诊断：相关菜 西红柿炒鸡蛋
+    # 精排分 0.57→0.97、终序 19→3）；保留原查询可避免精排被聚焦菜名主导（只用改写
+    # 文本时类别组 MRR 0.583→0.500）；关闭则维持"精排恒用原查询"的旧行为
+    RAG_RERANK_QUERY_REWRITE: bool = True
 
     @property
     def rerank_api_key(self) -> str:
