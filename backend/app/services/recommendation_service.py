@@ -2,7 +2,7 @@
 
 import logging
 import re
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional
 from sqlalchemy.orm import Session, joinedload
 
 from app.models import (

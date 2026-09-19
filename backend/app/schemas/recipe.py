@@ -6,7 +6,6 @@
   - 步骤信息（StepInfo, StepCreate）
   - 菜谱 CRUD（RecipeCreate, RecipeUpdate）
   - 菜谱列表/详情响应（RecipeListItem, RecipeDetail）
-  - 搜索参数（RecipeSearchParams）
 """
 
 from pydantic import BaseModel, Field, model_validator, field_validator
@@ -209,13 +208,3 @@ class RecipeDetail(BaseModel):
 
     class Config:
         from_attributes = True
-
-
-class RecipeSearchParams(BaseModel):
-    keyword: Optional[str] = None
-    difficulty: Optional[str] = None
-    tag_ids: Optional[str] = None  # 逗号分隔
-    max_cost: Optional[float] = None
-    status: str = "approved"
-    page: int = Field(1, ge=1)
-    page_size: int = Field(20, ge=1, le=100)

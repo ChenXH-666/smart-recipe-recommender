@@ -42,7 +42,7 @@ from typing import AsyncGenerator, List, Dict
 
 from langchain_openai import ChatOpenAI
 from langchain_classic.memory import ConversationBufferMemory
-from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.config import get_settings
 from app.services.rag_service import rag_search, build_recipe_pool_context

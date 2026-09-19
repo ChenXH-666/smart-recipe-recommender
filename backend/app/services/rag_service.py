@@ -680,21 +680,7 @@ def _hybrid_search(
     if not v_docs and not kw_results:
         return []
 
-    vector_list = [
-        _chunk_key(
-            d.page_content,
-            (d.metadata or {}).get("source_id", 0),
-            (d.metadata or {}).get("source_type", ""),
-        )
-        for d in v_docs
-    ]
-    keyword_list = [
-        _chunk_key(r["content"], r["source_id"], r["source_type"]) for r in kw_results
-    ]
-    fused = _rrf_fuse([vector_list, keyword_list], k=settings.RAG_HYBRID_RRF_K)[:top_k]
-
-    # 融合结果回填：同键优先用向量通道的 Document（保证与 Chroma 实时状态一致），
-    # 仅关键词通道命中的分块用 BM25 索引快照。
+    # 分块键只算一遍：v_map 的键序即向量通道排名序（供 RRF 融合与回填共用）
     v_map = {
         _chunk_key(
             d.page_content,
@@ -706,7 +692,11 @@ def _hybrid_search(
     kw_map = {
         _chunk_key(r["content"], r["source_id"], r["source_type"]): r for r in kw_results
     }
+    fused = _rrf_fuse([list(v_map), list(kw_map)],
+                      k=settings.RAG_HYBRID_RRF_K)[:top_k]
 
+    # 融合结果回填：同键优先用向量通道的 Document（保证与 Chroma 实时状态一致），
+    # 仅关键词通道命中的分块用 BM25 索引快照。
     results = []
     for key in fused:
         if key in v_map:

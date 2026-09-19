@@ -53,7 +53,8 @@
 | `/meal-plans` | MealPlanList | 套餐广场（卡片展示封面图） |
 | `/meal-plans/create` | MealPlanCreate | 创建套餐 |
 | `/meal-plans/:id` | MealPlanDetail | 套餐详情（管理员可在详情页直接审核；被驳回套餐向作者展示驳回原因） |
-| `/notes` | CookingNotes | 烹饪心得（浏览+发布） |
+| `/cooking-notes` | CookingNotes | 烹饪心得（浏览+发布；旧路径 `/notes` 自动重定向） |
+| `/cooking-notes/:id` | CookingNoteDetail | 心得详情 |
 | `/login` | Login | 登录 |
 | `/register` | Register | 注册 |
 | `/user/profile` | Profile | 个人资料 |
@@ -61,9 +62,12 @@
 | `/user/favorites` | Favorites | 我的收藏 |
 | `/user/history` | History | 浏览历史 |
 | `/user/conversations` | Conversations | AI 对话历史 |
+| `/user/preferences` | Preferences | 饮食偏好设置（忌口/过敏原） |
+| `/user/my-recipes` | MyRecipes | 我的菜谱（含草稿/待审核/已驳回） |
+| `/user/my-meal-plans` | MyMealPlans | 我的套餐（含草稿/待审核/已驳回） |
 | `/admin` | AdminDashboard | 管理后台首页 |
-| `/admin/recipes` | RecipeAudit | 菜谱审核 |
-| `/admin/meal-plans` | MealPlanAudit | 套餐审核 |
+| `/admin/recipe-audit` | RecipeAudit | 菜谱审核（旧路径 `/admin/recipes` 自动重定向） |
+| `/admin/meal-plan-audit` | MealPlanAudit | 套餐审核（旧路径 `/admin/meal-plans` 自动重定向） |
 | `/admin/tags` | TagManage | 标签管理 |
 | `/admin/ingredients` | IngredientManage | 食材管理 |
 | `/admin/ingredient-audit` | IngredientAudit | 食材审核（用户提交的食材） |
@@ -161,7 +165,7 @@ cd backend
 conda activate food
 python -m pytest tests -v --cov=app --cov-report=term-missing
 ```
-单元测试基于 pytest 编写，共 243 个用例，覆盖纯函数 / 模型 / 服务 / 接口四层；测试使用 SQLite 内存库并对 Chroma、LLM 等外部依赖打桩隔离，无需连接真实数据库与模型服务。整体行覆盖率约 63%，核心逻辑（配置、安全、统计、营养、工具函数、AI 引擎）覆盖率 74%~100%。
+单元测试基于 pytest 编写，共 242 个用例，覆盖纯函数 / 模型 / 服务 / 接口四层；测试使用 SQLite 内存库并对 Chroma、LLM 等外部依赖打桩隔离，无需连接真实数据库与模型服务。整体行覆盖率约 63%，核心逻辑（配置、安全、统计、营养、工具函数、AI 引擎）覆盖率 74%~100%。
 
 ### 7. 运行接口性能基准
 ```bash

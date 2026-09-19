@@ -78,8 +78,3 @@ def parse_grams(quantity: str, default_per_item: int = 100) -> float | None:
 
     # 只有数字无单位：按"份数"× 默认单份
     return num * default_per_item if num else default_per_item
-
-
-def split_quantity_units(quantity: str) -> float | None:
-    """返回克数（复用 parse_grams，纯数字兜底为 None 的版本留给调用方决定）"""
-    return parse_grams(quantity)

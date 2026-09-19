@@ -2,7 +2,7 @@
 """utils/portions.py —— 用量文本解析工具单元测试。"""
 import pytest
 
-from app.utils.portions import parse_grams, split_quantity_units
+from app.utils.portions import parse_grams
 
 
 class TestParseGrams:
@@ -67,7 +67,3 @@ class TestParseGrams:
 
     def test_spaces_trimmed(self):
         assert parse_grams(" 200 克 ") == 200.0
-
-
-def test_split_quantity_units_delegates():
-    assert split_quantity_units("100克") == parse_grams("100克")
