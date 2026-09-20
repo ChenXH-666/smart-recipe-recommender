@@ -94,9 +94,9 @@ class Settings(BaseSettings):
     LLM_BASE_URL: str = "https://api.xiaomimimo.com/v1"
     LLM_TEMPERATURE: float = 0.7  # 0.7 平衡创造性与稳定性
     LLM_MAX_TOKENS: int = 4096  # 至少 4096，避免完整菜单/做法输出被截断
-    # 是否关闭模型思考模式：部分模型（如 MiMo mimo-v2.5 / mimo-v2.5-pro）默认开启
-    # 深度思考（输出 reasoning_content 推理链）。设为 true 时在请求体传 thinking.type=disabled
-    LLM_DISABLE_THINKING: bool = True
+    # 说明：思考模式不提供开关，由 provider 在客户端侧锁定关闭（LLM_PROVIDER=mimo 时
+    # 请求体恒传 thinking.type=disabled，见 ai_service._get_llm 与 rag_service 改写调用），
+    # 本项目所有 LLM 场景（对话、查询改写）都只需要直接给答案，无深度思考需求
 
     # 菜谱封面图白名单域名（仅允许专业美食网站，符合项目硬约束）
     RECIPE_COVER_WHITELIST: str = "meishichina.com,xiachufang.com,douguo.com,xiangha.com"

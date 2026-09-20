@@ -852,7 +852,7 @@ MRR 0.580、NDCG@12 0.544，场景意图型查询由 0.133→0.500（5 条查询
 | LLM_MODEL | mimo-v2.5 | 小米 Mimo 对话模型；LLM_PROVIDER=mimo 时自动关闭深度思考 |
 | LLM_TEMPERATURE | 0.7 | 平衡创造性与稳定性 |
 | LLM_MAX_TOKENS | 4096 | 单次回复上限（≥4096，避免完整菜单被截断） |
-| LLM_DISABLE_THINKING | True | 关闭 MiMo 等默认深度思考（reasoning_content） |
+| （思考模式） | 恒关闭 | MiMo 默认开启深度思考（reasoning_content 推理链），由客户端按 provider 锁定关闭（请求体传 `thinking.type=disabled`），不提供运行期开关 |
 | RAG_TOP_K | 5 | 基础检索返回文档块数 |
 | RAG_CHAT_RECALL_K | 40 | 对话RAG每路召回候选分块数（召回率优先） |
 | RAG_CHAT_MAX_DISHES | 12 | 去重后喂给模型的菜谱上限 |
