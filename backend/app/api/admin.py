@@ -12,6 +12,7 @@
 from datetime import datetime
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import update
 
@@ -80,7 +81,13 @@ def create_tag(
         raise HTTPException(status_code=400, detail="标签已存在")
     tag = Tag(name=name, type=type, description=description)
     db.add(tag)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # 并发兜底：两个请求同时通过上方预检时由 uk_name_type 拦截。
+        # MySQL 唯一索引中 NULL 不参与判断，type 为空时无数据库兜底（现有表结构限制）。
+        db.rollback()
+        raise HTTPException(status_code=400, detail="标签已存在")
     return SuccessResponse(message="创建成功", id=tag.id)
 
 
@@ -114,7 +121,12 @@ def update_tag(
         tag.type = type
     if description is not None:
         tag.description = description
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # 并发兜底：改名与另一请求撞 name+type 时，转为业务错误而非 500
+        db.rollback()
+        raise HTTPException(status_code=400, detail="标签名+类型已存在")
     return SuccessResponse(message="更新成功")
 
 
@@ -228,7 +240,12 @@ def create_ingredient(
         submitted_by=None if is_admin else current_user.id,
     )
     db.add(ing)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # 并发兜底：两个请求同时通过 name 预检时由唯一约束拦截
+        db.rollback()
+        raise HTTPException(status_code=400, detail="食材已存在")
     return SuccessResponse(
         message="创建成功" if is_admin else "提交成功，等待管理员审核",
         id=ing.id,
@@ -277,7 +294,12 @@ def update_ingredient(
         ing.category = category
     if image_url is not None:
         ing.image_url = image_url
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # 并发兜底：改名与另一请求撞 name 唯一约束时，转为业务错误而非 500
+        db.rollback()
+        raise HTTPException(status_code=400, detail="食材名已存在")
     return SuccessResponse(message="更新成功")
 
 
@@ -325,7 +347,9 @@ def list_pending_recipes(
     if status not in ("pending", "approved", "rejected"):
         raise HTTPException(status_code=400, detail="status 必须为 pending/approved/rejected")
 
-    query = db.query(Recipe).options(joinedload(Recipe.author)).filter(
+    query = db.query(Recipe).options(
+        joinedload(Recipe.author), joinedload(Recipe.reviewer)
+    ).filter(
         Recipe.is_deleted == 0,
         Recipe.status == status,
     )
@@ -419,7 +443,9 @@ def list_pending_meal_plans(
     if status not in ("pending", "approved", "rejected"):
         raise HTTPException(status_code=400, detail="status 必须为 pending/approved/rejected")
 
-    query = db.query(MealPlan).options(joinedload(MealPlan.creator)).filter(
+    query = db.query(MealPlan).options(
+        joinedload(MealPlan.creator), joinedload(MealPlan.reviewer)
+    ).filter(
         MealPlan.is_deleted == 0,
         MealPlan.status == status,
     )

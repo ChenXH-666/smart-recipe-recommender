@@ -8,7 +8,7 @@
 本系统实现了三层权限依赖注入，通过 FastAPI 的 Depends() 机制实现：
 
   【第一层】get_current_user  → 必须登录（强制认证）
-    使用 HTTPBearer(auto_error=True)：无 Authorization header → 403
+    使用 HTTPBearer(auto_error=True)：无 Authorization header → 401
     token 无效/过期/用户不存在 → 401 Unauthorized。
 
   【第二层】get_admin_user    → 必须管理员（强制认证 + 角色检查）
@@ -24,7 +24,7 @@
 
 关键注意：
   get_optional_user 与 get_current_user 必须使用不同的 HTTPBearer 实例！
-  共享 auto_error=True 的实例会导致未登录用户访问"可选认证"接口时被强制返回 403。
+  共享 auto_error=True 的实例会导致未登录用户访问"可选认证"接口时被强制返回 401。
 """
 
 from fastapi import Depends, HTTPException, status

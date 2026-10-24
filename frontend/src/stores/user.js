@@ -55,6 +55,12 @@ export const useUserStore = defineStore('user', () => {
     localStorage.removeItem('user')
   }
 
+  // 资料更新后同步 store 与本地缓存（组件不应直接改写 user，统一走此 action）
+  function updateUserInfo(patch) {
+    user.value = { ...(user.value || {}), ...patch }
+    localStorage.setItem('user', JSON.stringify(user.value))
+  }
+
   /**
    * 启动时校验登录态（防"自动登录成官方小厨但一操作就过期"）。
    *
@@ -86,5 +92,5 @@ export const useUserStore = defineStore('user', () => {
     }
   }
 
-  return { user, token, isLoggedIn, isAdmin, login, register, logout, validateSession }
+  return { user, token, isLoggedIn, isAdmin, login, register, logout, validateSession, updateUserInfo }
 })

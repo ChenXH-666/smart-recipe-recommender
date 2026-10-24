@@ -39,7 +39,7 @@
             </el-tag>
           </div>
         </div>
-        <div v-for="(msg, idx) in messages" :key="idx" :class="['message', msg.role]">
+        <div v-for="(msg, idx) in messages" :key="msg._key" :class="['message', msg.role]">
           <div class="msg-avatar">
             <el-icon v-if="msg.role === 'user'"><User /></el-icon>
             <el-icon v-else><MagicStick /></el-icon>
@@ -185,9 +185,12 @@ const quickTips = ref([
 // 渲染消息：先去除内容首尾的多余空白/换行，再走 Markdown 渲染，避免前后出现空白行
 const renderMsg = (t) => renderMarkdown((t || '').trim())
 
+// 本地消息自增 key：v-for 不能用 index 作 key（编辑重答会截断数组，
+// index 复用会导致 DOM 状态错乱）；历史消息优先用服务端 id，本地新消息用自增序号
+let msgUid = 0
 // 包装消息：进入列表时预计算 Markdown HTML（历史消息渲染一次即缓存复用，
 // 流式重渲染不再重复解析；流式中的 streamText 仍逐 chunk 渲染，属打字机必要开销）
-const withHtml = (m) => ({ ...m, html: renderMsg(m.content) })
+const withHtml = (m) => ({ ...m, html: renderMsg(m.content), _key: m.id ?? `local-${++msgUid}` })
 
 // 打开抽屉时加载个性化"猜你想问"预设备题（登录后按用户偏好动态生成）
 async function loadQuickTips() {
@@ -258,6 +261,16 @@ function scrollToBottom() {
   }
 }
 
+// 流式期间的滚动做节流：SSE 高频推流时每个 chunk 都 nextTick 会让微任务队列堆积，
+// 长对话出现渲染卡顿；150ms 一次的滚动节奏肉眼无感
+let lastScrollAt = 0
+function scrollToBottomThrottled() {
+  const now = Date.now()
+  if (now - lastScrollAt < 150) return
+  lastScrollAt = now
+  scrollToBottom()
+}
+
 function sendQuickTip(tip) {
   // 点击预设标签：只把问题填入输入框并聚焦，不自动发送，由用户确认后再发送
   inputText.value = tip
@@ -302,7 +315,7 @@ async function sendMessage() {
 
   try {
     const { conversationId: convId } = await streamSSE({
-      url: '/api/ai/chat',
+      url: ai.chatStreamUrl,
       body: {
         message: text,
         conversation_id: conversationId.value,
@@ -310,7 +323,7 @@ async function sendMessage() {
       signal: abortController.signal,
       onChunk: (chunk) => {
         streamText.value += chunk
-        scrollToBottom()
+        scrollToBottomThrottled()
       },
       onDone: () => {
         // 流结束：将累积的流文本作为 AI 回复保留

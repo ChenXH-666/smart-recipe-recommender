@@ -10,7 +10,7 @@
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import and_, or_, func, desc, asc, update, case
+from sqlalchemy import and_, or_, func, desc, asc, update, case, select
 from datetime import datetime, timedelta
 
 from app.database import get_db
@@ -214,7 +214,13 @@ def list_recipes(
     if tag_ids:
         ids = parse_int_list(tag_ids, max_items=50)
         if ids:
-            query = query.join(RecipeTag).filter(RecipeTag.tag_id.in_(ids))
+            # 用子查询而非 JOIN：一个菜谱命中多个标签时 JOIN 会产生重复行，
+            # 导致 total 计数虚高、分页结果重复出现同一菜谱
+            query = query.filter(
+                Recipe.id.in_(
+                    select(RecipeTag.recipe_id).where(RecipeTag.tag_id.in_(ids))
+                )
+            )
 
     # 排序字段白名单，防止任意字段排序
     sort_by = sort_by if sort_by in _ALLOWED_SORT_FIELDS else "created_at"
@@ -362,6 +368,9 @@ def get_recipe(
         .filter(Recipe.id == recipe_id, Recipe.is_deleted == 0)
         .first()
     )
+    if not recipe:
+        # 并发删除兜底：commit 后到重查之间菜谱被软删
+        raise HTTPException(status_code=404, detail="菜谱不存在")
 
     from app.utils.recipe_diet import get_restriction_set
     return _enrich_recipe_detail(recipe, get_restriction_set(current_user))

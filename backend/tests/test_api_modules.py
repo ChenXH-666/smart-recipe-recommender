@@ -73,6 +73,15 @@ class TestUsers:
         assert r.status_code == 200
         assert r.json()["nickname"] == "暖心大厨"
 
+    def test_change_password_rejects_weak_composition(self, client):
+        _register(client)
+        token = _login(client)
+        r = client.put("/api/users/password", json={
+            "old_password": "pass1234", "new_password": "12345678",
+        }, headers=_auth(token))
+        assert r.status_code == 400
+        assert "字母" in r.json()["message"]
+
     def test_favorites_lifecycle(self, client, db):
         uid = _register(client)
         token = _login(client)
@@ -172,6 +181,15 @@ class TestReviews:
         assert client.delete(f"/api/reviews/{review_id}",
                              headers=_auth(token)).status_code == 200
 
+        # 软删除后允许重新点评：复用原行恢复可见，唯一约束不应阻止重建
+        again = client.post(f"/api/reviews/recipes/{rid}",
+                            json={"rating": 3, "content": "改主意了"},
+                            headers=_auth(token))
+        assert again.status_code == 200
+        assert again.json()["id"] == review_id
+        assert again.json()["content"] == "改主意了"
+        assert client.get(f"/api/reviews/recipes/{rid}").json()["total"] == 1
+
 
 # ------------------------------- 烹饪心得 -------------------------------
 
@@ -201,6 +219,34 @@ class TestCookingNotes:
 
         rmv = client.delete(f"/api/cooking-notes/{note_id}", headers=_auth(token))
         assert rmv.status_code == 200
+
+    def test_related_recipe_must_be_approved_and_title_hidden(self, client, db):
+        uid = _register(client)
+        token = _login(client)
+        rid = _approved_recipe(db, uid)
+
+        create = client.post("/api/cooking-notes", json={
+            "title": "关联公开菜谱", "content": "好吃", "related_recipe_id": rid,
+        }, headers=_auth(token))
+        assert create.status_code == 201
+        note_id = create.json()["id"]
+
+        # 菜谱后续被驳回/下架：公开心得不再回显标题
+        db.query(Recipe).filter(Recipe.id == rid).update({"status": "pending"})
+        db.commit()
+        got = client.get(f"/api/cooking-notes/{note_id}")
+        assert got.status_code == 200
+        assert got.json()["related_recipe_title"] is None
+
+        # 新心得也不能关联未过审菜谱
+        pending = Recipe(title="未过审菜", status="pending", is_deleted=0, author_id=uid)
+        db.add(pending)
+        db.commit()
+        rejected = client.post("/api/cooking-notes", json={
+            "title": "非法关联", "content": "不应成功", "related_recipe_id": pending.id,
+        }, headers=_auth(token))
+        assert rejected.status_code == 400
+        assert "未通过审核" in rejected.json()["message"]
 
 
 # ------------------------------- 套餐 -------------------------------
@@ -381,3 +427,109 @@ class TestSecurity:
         assert create.status_code == 200
         row = db.query(RecipeReview).first()
         assert row.content == payload["content"]
+
+
+# ------------------------------- 智能推荐接口防护 -------------------------------
+
+class TestRecommendationQueryGuards:
+    def test_query_length_and_budget_validation(self, client):
+        too_long = client.post("/api/recommendations/query",
+                               json={"query": "菜" * 201})
+        assert too_long.status_code == 422
+
+        negative_budget = client.post("/api/recommendations/query",
+                                      json={"query": "番茄炒蛋", "budget": -1})
+        assert negative_budget.status_code == 422
+
+    def test_query_rate_limited_per_ip(self, client, monkeypatch):
+        import app.api.recommendations as recommendations_api
+        # 打桩检索服务，仅验证限流依赖本身
+        monkeypatch.setattr(recommendations_api, "rag_recommend_by_query",
+                            lambda *args, **kwargs: [])
+
+        for _ in range(20):
+            r = client.post("/api/recommendations/query", json={"query": "番茄炒蛋"})
+            assert r.status_code == 200
+        assert client.post("/api/recommendations/query",
+                           json={"query": "番茄炒蛋"}).status_code == 429
+
+
+# ------------------------------- 接口稳健性回归 -------------------------------
+
+class TestFavoritesCheck:
+    """GET /users/favorites/check：详情页单条收藏状态查询。"""
+
+    def test_check_favorite_before_and_after(self, client, db):
+        uid = _register(client)
+        token = _login(client)
+        rid = _approved_recipe(db, uid)
+
+        before = client.get("/api/users/favorites/check",
+                            params={"favorite_type": "recipe", "favorite_id": rid},
+                            headers=_auth(token))
+        assert before.status_code == 200
+        assert before.json()["is_favorited"] is False
+
+        client.post("/api/users/favorites",
+                    params={"favorite_type": "recipe", "favorite_id": rid},
+                    headers=_auth(token))
+        after = client.get("/api/users/favorites/check",
+                           params={"favorite_type": "recipe", "favorite_id": rid},
+                           headers=_auth(token))
+        assert after.json()["is_favorited"] is True
+
+    def test_check_favorite_requires_login(self, client):
+        r = client.get("/api/users/favorites/check",
+                       params={"favorite_type": "recipe", "favorite_id": 1})
+        assert r.status_code == 401
+
+
+class TestTagFilterDedup:
+    """tag_ids 多标签筛选：一个菜谱命中多个标签时不得重复计数/重复返回。"""
+
+    def test_multi_tag_match_counts_once(self, client, db):
+        from app.models import Tag, RecipeTag
+
+        uid = _register(client)
+        rid = _approved_recipe(db, uid, title="双标签菜")
+        t1 = Tag(name="家常菜", type="cuisine")
+        t2 = Tag(name="快手", type="scene")
+        db.add_all([t1, t2])
+        db.flush()
+        db.add_all([RecipeTag(recipe_id=rid, tag_id=t1.id),
+                    RecipeTag(recipe_id=rid, tag_id=t2.id)])
+        db.commit()
+
+        # 同一菜谱同时命中两个标签：JOIN 实现会返回 2 行、total=2
+        r = client.get("/api/recipes", params={"tag_ids": f"{t1.id},{t2.id}"})
+        assert r.status_code == 200
+        assert r.json()["total"] == 1
+        assert [it["id"] for it in r.json()["items"]] == [rid]
+
+
+class TestConversationOrdering:
+    """会话列表按最新活跃排序：rewind-edit 变更消息后 updated_at 必须刷新。"""
+
+    def test_rewind_edit_bumps_updated_at(self, client, db):
+        from app.models import AiConversation, AiMessage
+
+        uid = _register(client)
+        token = _login(client)
+        past = datetime(2020, 1, 1, 0, 0, 0)
+        conv = AiConversation(user_id=uid, title="旧会话",
+                              created_at=past, updated_at=past)
+        db.add(conv)
+        db.flush()
+        msg1 = AiMessage(conversation_id=conv.id, role="user", content="问题一")
+        msg2 = AiMessage(conversation_id=conv.id, role="assistant", content="回答一")
+        db.add_all([msg1, msg2])
+        db.commit()
+
+        r = client.post(f"/api/ai/conversations/{conv.id}/rewind-edit",
+                        json={"message_id": msg1.id, "new_content": "改一下"},
+                        headers=_auth(token))
+        assert r.status_code == 200, r.text
+
+        db.expire_all()
+        refreshed = db.query(AiConversation).get(conv.id)
+        assert refreshed.updated_at > past

@@ -109,6 +109,13 @@ settings = get_settings()
 _vectorstore: Optional[Chroma] = None
 _vs_lock = threading.Lock()
 
+# 向量写入串行锁：sync_*_to_chroma 采用"先删后插"且分块 ID 固定
+# （recipe_{id}_{i}），同一菜谱的两次后台同步（如编辑后立即审核通过）
+# 并发交错会导致 delete 打掉对方刚写入的分块、或 add 撞重复 ID 报错。
+# 写入方是低频后台任务，全局串行化即可消除该竞态（Embedding 耗时
+# 本就在后台线程，不影响请求响应）。
+_vs_write_lock = threading.Lock()
+
 # 文本分割器 —— 在中文语义边界处进行切割
 _text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=settings.RAG_CHUNK_SIZE,
@@ -125,9 +132,10 @@ class SiliconFlowEmbeddings(Embeddings):
     每次调用将文本批量发送，返回对应的 1024 维浮点向量列表。
 
     【容错设计】
-      - API 调用失败（403、网络异常等）时，记录错误但返回零向量兜底
-      - 保证上层调用（Chroma.similarity_search）不会因为嵌入服务挂掉而崩溃
-      - 返回的零向量会使相似度检索退化为"随机/全量扫描"，再由上层进行关键词过滤
+      - 文档批量嵌入（embed_documents）：API 失败时记录错误并返回零向量兜底，
+        保证导入/同步任务不中断（该批分块仅丢失向量信号，文本仍入 BM25 索引）
+      - 查询嵌入（embed_query）：失败直接抛异常，由召回通道的异常处理
+        降级为纯关键词检索——零向量在此无效（见 embed_query 注释）
     """
 
     # 兜底零向量维度（与 BGE-M3 输出一致：1024）
@@ -206,9 +214,16 @@ class SiliconFlowEmbeddings(Embeddings):
         return self._embed(texts)
 
     def embed_query(self, text: str) -> List[float]:
-        """嵌入单个查询文本（LangChain 单条接口）"""
-        result = self._embed([text])
-        return result[0] if result else [0.0] * self._FALLBACK_DIM
+        """嵌入单个查询文本（LangChain 单条接口）。
+
+        查询侧失败必须抛异常而非零向量兜底：零向量不会触发上层
+        "向量搜索无结果→关键词兜底"分支（L2 距离下零向量仍能返回
+        按向量范数排序的任意结果），混合路径的 RRF 会把这些垃圾排序
+        与 BM25 结果融合，约束类查询（纯向量链路）更是直接全量失真。
+        抛异常后由各召回通道的 try/except 捕获，退化为关键词通道，
+        与文档声明的降级行为一致。
+        """
+        return self._embed([text], raise_on_error=True)[0]
 
 
 def _get_embedding_model():
@@ -311,10 +326,14 @@ def remove_from_chroma(source_type: str, source_id: int):
     保证向量库与 MySQL 状态一致：菜谱/心得被删除或驳回后，
     RAG 检索不再返回该内容（与 rebuild_vectorstore 只收录
     approved 且未删除内容的语义对齐）。
+
+    同样走 _vs_write_lock：否则"删除"与并发的"同步"交错时，
+    同步方的 add 可能落在删除之后，把已删除内容写回向量库。
     """
     try:
-        vs = get_vectorstore()
-        _delete_chunks_by_prefix(vs, source_type, source_id)
+        with _vs_write_lock:
+            vs = get_vectorstore()
+            _delete_chunks_by_prefix(vs, source_type, source_id)
         logger.info(f"已从向量库移除 {source_type} {source_id} 的全部分块")
     except Exception as e:
         logger.error(f"从向量库移除 {source_type} {source_id} 失败: {e}")
@@ -350,8 +369,14 @@ def sync_recipe_to_chroma_by_id(recipe_id: int):
             .filter(Recipe.id == recipe_id, Recipe.is_deleted == 0)
             .first()
         )
-        if recipe:
+        # 执行时复查状态：任务排队后菜谱可能已被驳回（审核 remove 与旧同步任务
+        # 的先后不受锁外顺序保证），非 approved 内容一律不入库，且顺手清掉
+        # 可能残留的旧分块（如 approve 后又被 reject 的竞态残留）
+        if recipe and recipe.status == "approved":
             sync_recipe_to_chroma(recipe)
+        elif recipe:
+            remove_from_chroma("recipe", recipe_id)
+            logger.warning(f"后台同步菜谱 {recipe_id}：状态为 {recipe.status}，已改为移除分块")
         else:
             logger.warning(f"后台同步菜谱 {recipe_id} 到向量库：菜谱不存在或已删除，跳过")
     except Exception as e:
@@ -370,8 +395,12 @@ def sync_cooking_note_to_chroma_by_id(note_id: int):
         note = db.query(CookingNote).filter(
             CookingNote.id == note_id, CookingNote.is_deleted == 0
         ).first()
-        if note:
+        # 执行时复查可见性：任务排队后心得可能已转私密，私密内容不入向量库
+        if note and note.is_public:
             sync_cooking_note_to_chroma(note)
+        elif note:
+            remove_from_chroma("cooking_note", note_id)
+            logger.warning(f"后台同步心得 {note_id}：已转私密，已改为移除分块")
         else:
             logger.warning(f"后台同步心得 {note_id} 到向量库：心得不存在或已删除，跳过")
     except Exception as e:
@@ -385,30 +414,32 @@ def sync_recipe_to_chroma(recipe):
     将单个菜谱同步到向量库（增量更新）。
     采用"先删后插"策略：先按 source_type+source_id 删除所有旧分块，
     再计算新的 embedding 并插入，保证幂等性和数据一致性。
+    整个过程在 _vs_write_lock 内串行执行（见锁定义处注释）。
     """
     try:
-        vs = get_vectorstore()
-        text = _build_recipe_text(recipe)
+        with _vs_write_lock:
+            vs = get_vectorstore()
+            text = _build_recipe_text(recipe)
 
-        # 删除该菜谱的所有旧分块（按 metadata 过滤，解决分块 ID 不匹配问题）
-        _delete_chunks_by_prefix(vs, "recipe", recipe.id)
+            # 删除该菜谱的所有旧分块（按 metadata 过滤，解决分块 ID 不匹配问题）
+            _delete_chunks_by_prefix(vs, "recipe", recipe.id)
 
-        tags_str = "、".join([t.tag.name for t in recipe.tags]) if hasattr(recipe, 'tags') and recipe.tags else ""
+            tags_str = "、".join([t.tag.name for t in recipe.tags]) if hasattr(recipe, 'tags') and recipe.tags else ""
 
-        # 分块并生成多段向量文档
-        chunks = _text_splitter.split_text(text)
-        ids = [f"recipe_{recipe.id}_{i}" for i in range(len(chunks))]
-        metadatas = [
-            {
-                "source_type": "recipe",
-                "source_id": recipe.id,
-                "title": recipe.title,
-                "tags": tags_str,
-            }
-            for _ in chunks
-        ]
+            # 分块并生成多段向量文档
+            chunks = _text_splitter.split_text(text)
+            ids = [f"recipe_{recipe.id}_{i}" for i in range(len(chunks))]
+            metadatas = [
+                {
+                    "source_type": "recipe",
+                    "source_id": recipe.id,
+                    "title": recipe.title,
+                    "tags": tags_str,
+                }
+                for _ in chunks
+            ]
 
-        vs.add_texts(chunks, metadatas=metadatas, ids=ids)
+            vs.add_texts(chunks, metadatas=metadatas, ids=ids)
         logger.info(f"已同步菜谱 {recipe.id} ({recipe.title}) 到向量库，共 {len(chunks)} 块")
     except Exception as e:
         logger.error(f"同步菜谱到向量库失败: {e}")
@@ -420,25 +451,26 @@ def sync_recipe_to_chroma(recipe):
 def sync_cooking_note_to_chroma(note):
     """将烹饪心得同步到向量库（与菜谱同步逻辑一致）"""
     try:
-        vs = get_vectorstore()
-        text = _build_note_text(note)
+        with _vs_write_lock:
+            vs = get_vectorstore()
+            text = _build_note_text(note)
 
-        # 删除该心得的所有旧分块
-        _delete_chunks_by_prefix(vs, "cooking_note", note.id)
+            # 删除该心得的所有旧分块
+            _delete_chunks_by_prefix(vs, "cooking_note", note.id)
 
-        chunks = _text_splitter.split_text(text)
-        ids = [f"note_{note.id}_{i}" for i in range(len(chunks))]
-        metadatas = [
-            {
-                "source_type": "cooking_note",
-                "source_id": note.id,
-                "title": note.title,
-                "tags": "",
-            }
-            for _ in chunks
-        ]
+            chunks = _text_splitter.split_text(text)
+            ids = [f"note_{note.id}_{i}" for i in range(len(chunks))]
+            metadatas = [
+                {
+                    "source_type": "cooking_note",
+                    "source_id": note.id,
+                    "title": note.title,
+                    "tags": "",
+                }
+                for _ in chunks
+            ]
 
-        vs.add_texts(chunks, metadatas=metadatas, ids=ids)
+            vs.add_texts(chunks, metadatas=metadatas, ids=ids)
         logger.info(f"已同步心得 {note.id} ({note.title}) 到向量库，共 {len(chunks)} 块")
     except Exception as e:
         logger.error(f"同步心得向量库失败: {e}")
@@ -1359,8 +1391,15 @@ def build_recipe_pool_context(
     rewritten_query = plan_query_rewrite(query) if settings.RAG_QUERY_REWRITE else None
 
     # ---- 1) 候选池：向量召回 + 热门兜底补足（①②）----
-    results = rag_search(query, top_k=recall_k, filter_source_type="recipe",
-                         rewrite=False, rewritten_query=rewritten_query)
+    # 最外层兜底：rag_search 内部各通道已有降级，但 get_vectorstore() 初始化失败
+    # （磁盘损坏/占用）等会穿透到这里——不追加这层 try，整轮对话会以错误收尾；
+    # 吞掉后走下方热门兜底，对话退化为"基于热门菜推荐"而非直接不可用
+    try:
+        results = rag_search(query, top_k=recall_k, filter_source_type="recipe",
+                             rewrite=False, rewritten_query=rewritten_query)
+    except Exception as e:
+        logger.error(f"RAG 召回整体失败（降级为热门兜底）: {e}")
+        results = []
     pool: List[int] = []
     seen: set = set()
     for r in results:

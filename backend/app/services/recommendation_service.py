@@ -2,7 +2,7 @@
 
 import logging
 from typing import List, Dict, Optional
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.utils.text_match import keyword_match_score, tokenize_query
 
@@ -610,7 +610,9 @@ def get_personalized_meal_plans(
 
     plans = (
         db.query(MealPlan)
-        .options(joinedload(MealPlan.creator))
+        # 预加载 items：下方按命中数排序需遍历每个套餐的菜品，缺省会逐套餐懒加载（N+1）。
+        # 集合关系用 selectinload，避免与上方 JOIN 叠加产生行膨胀
+        .options(joinedload(MealPlan.creator), selectinload(MealPlan.items))
         .join(MealPlanItem)
         .filter(
             MealPlan.status == "approved",

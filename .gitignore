@@ -1,6 +1,7 @@
 # IDE & Editor
 .idea/
 .vscode/
+.qoder/
 *.swp
 *.swo
 *~
@@ -123,3 +124,4 @@ screenshot_profile.py
 screenshot_*.png
 
 检索优化待办.md
+模型分工待办.md

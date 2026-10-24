@@ -165,7 +165,7 @@ cd backend
 conda activate food
 python -m pytest tests -v --cov=app --cov-report=term-missing
 ```
-单元测试基于 pytest 编写，共 242 个用例，覆盖纯函数 / 模型 / 服务 / 接口四层；测试使用 SQLite 内存库并对 Chroma、LLM 等外部依赖打桩隔离，无需连接真实数据库与模型服务。整体行覆盖率约 63%，核心逻辑（配置、安全、统计、营养、工具函数、AI 引擎）覆盖率 74%~100%。
+单元测试基于 pytest 编写，共 250 个用例，覆盖纯函数 / 模型 / 服务 / 接口四层；测试使用 SQLite 内存库并对 Chroma、LLM 等外部依赖打桩隔离，无需连接真实数据库与模型服务。整体行覆盖率约 64%，核心逻辑（配置、安全、统计、营养、工具函数、AI 引擎）覆盖率 77%~100%。
 
 ### 7. 运行接口性能基准
 ```bash
@@ -196,6 +196,8 @@ python import_data/eval_rerank.py --diagnose --out-prefix eval_scenario
 
 **存量库升级提示（v1.1 唯一约束）**：浏览历史表新增了防并发重复的数据库唯一约束。新库执行 `SQL/init.sql` 自动生效；**已有旧库**需手动迁移（先清重复行再加约束，SQL 见 `database_design.md` 3.9 节），否则并发双击仍可能产生重复浏览记录。
 
+**存量库升级提示（点评唯一约束）**：点评表新增 `UNIQUE(user_id, recipe_id)`（`uk_review_user_recipe`），防止并发重复点评，并配合"软删除后重新点评复用原行"的实现。新库执行 `SQL/init.sql` 自动生效；**已有旧库**需先清理同一用户同一菜谱的重复点评再加约束（优先保留未删除行，SQL 见 `database_design.md` 10 节），否则并发重复提交仍可能产生多条记录。
+
 **存量库升级提示（食材审核字段）**：食材表新增 `status`/`submitted_by` 两列（用户可提交新食材、管理员审核）。新库执行 `SQL/init.sql` 自动生效；**已有旧库**需手动迁移：`ALTER TABLE ingredients ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'approved'; ALTER TABLE ingredients ADD COLUMN submitted_by INT UNSIGNED NULL;` 执行后历史食材自动置为 `approved`，如需归入官方账号可执行 `UPDATE ingredients SET submitted_by=1;`（1 为默认官方管理员「官方小厨」的 ID，按实际账号调整）。
 
 ## 工程优化与性能设计
@@ -210,6 +212,10 @@ python import_data/eval_rerank.py --diagnose --out-prefix eval_scenario
 | SQL 日志独立开关 | `config.py` `SQL_ECHO` | 与 `DEBUG` 解耦，默认关闭，避免演示/压测时日志爆炸 | 默认启动不再打印每条 SQL |
 | 首页统计 TTL 缓存 | `api/stats.py` | 7 次聚合 COUNT 缓存 60 秒，首页访问不再全量统计 | 连续两次访问 /api/stats，日志只查一次库 |
 | 详情接口 N+1 修复 | `api/recipes.py` | commit 后重新预加载 tags/ingredients/steps/author，避免懒加载回潮 | 打开详情页，后端日志仅 3~4 条 SQL |
+| 标签筛选子查询去重 | `api/recipes.py` | `tag_ids` 筛选改用 `IN` 子查询替代 JOIN：一个菜谱命中多个标签时 JOIN 会产生重复行，导致 `total` 计数虚高、分页结果重复 | 同时选多个标签筛选，总数与结果不重复 |
+| 审核列表 reviewer 预加载 | `api/admin.py` | 菜谱/套餐审核列表补 `joinedload(reviewer)`，消除循环内逐行懒加载 | 打开后台审核列表，SQL 条数不随行数增长 |
+| 套餐个性化推荐 items 预加载 | `services/recommendation_service.py` | 命中数排序需遍历套餐菜品，补 `selectinload(items)`（集合关系用 selectinload 避免 JOIN 行膨胀） | 登录用户查看推荐套餐，SQL 条数固定 |
+| 收藏状态单条查询 | `api/users.py` `GET /users/favorites/check` | 详情页判断是否已收藏，替代"拉全量 50 条收藏列表遍历比对" | 打开详情页，Network 中是一次 check 请求 |
 | 向量同步后台化 | `services/rag_service.py` `sync_*_by_id` | 创建/编辑/审核菜谱、心得时的 Embedding 同步改 `BackgroundTasks`，不再阻塞响应 | 管理员审核通过菜谱应立即返回，向量同步随后完成 |
 | 查询改写按需触发 | `services/rag_service.py` `plan_query_rewrite` | 仅当查询与全库菜名无 3 字以上连续命中（如"快手家常菜"）时才调用一次 LLM 改写，已含实体词的查询零开销；提示词聚焦 1~2 个菜名（并列菜名过多会分散检索权重）；改写结果校验不过（幻觉菜名/丢预算）即回退原查询 | 发"清蒸鲈鱼的做法"无改写日志、发"减脂晚餐"有"查询改写生效"日志；改写链路失败时对话仍正常返回 |
 | 约束类查询跳过关键词通道 | `services/rag_service.py` `query_has_explicit_constraint` | 含预算/人数约束的查询（如"预算100元的东北菜家常菜""三个人吃的晚餐"）跳过 BM25 关键词通道、退化为纯向量召回——"东北""家常"等泛类别词的字面命中会挤占语义命中的位次（回退与修复效果见 `PRD.md` 5.4 节评测）；仅约束类查询受影响 | 发"预算100元的东北菜"有"约束类查询跳过关键词通道"日志；跑评测 `--modes vector,hybrid,hybrid_fix` 约束组指标回到向量基线 |
@@ -226,6 +232,9 @@ python import_data/eval_rerank.py --diagnose --out-prefix eval_scenario
 |--------|------|------|---------|
 | 首页 5 路请求并行 | `views/Home.vue` | 热门/套餐/统计/忌口/推荐并行发起、各自渲染，总耗时=最慢一路 | F12 Network 见 5 个请求同时发出 |
 | AI 对话 Markdown 预计算 | `components/AiChatDialog.vue` | 历史消息进列表时渲染一次，流式重渲染不再重复解析 | 长对话流式输出期间页面不卡顿 |
+| AI 消息稳定 key + 滚动节流 | `components/AiChatDialog.vue` | v-for key 由 index 改为消息唯一标识（编辑重答截断数组后 DOM 不再错乱）；流式滚动 150ms 节流，避免微任务堆积 | 编辑中间消息重答，气泡/编辑态不错位 |
+| 套餐菜谱搜索防抖 | `views/MealPlanCreate.vue` | `remote-method` 300ms 防抖，键入停顿后才发请求，组件卸载清理定时器 | 连续输入时 Network 只发一次搜索请求 |
+| 详情页相关心得 | `views/RecipeDetail.vue` | 侧边栏按 `recipe_id` 加载关联心得（原为声明后从未加载的死代码），无数据时卡片自动隐藏 | 打开有心得的菜谱详情，右侧显示相关心得 |
 | 封面图懒加载 + 失败兜底 | `components/RecipeCard.vue` | `loading="lazy"` 视口内加载；外链图挂掉回退占位图 | 滚动列表时图片按需加载；断网图片显示占位 |
 | 构建分包 | `vite.config.js` | element-plus/图标/markdown 独立 chunk，业务包 1244KB→87KB | `npm run build` 产物多个 vendor chunk |
 
@@ -236,6 +245,18 @@ python import_data/eval_rerank.py --diagnose --out-prefix eval_scenario
 | 浏览历史 upsert 公共化 | `utils/browse_history.py` | 菜谱/套餐详情页与 /users/history 共用一份去重 + 并发兜底逻辑 |
 | 取消收藏公共逻辑 | `api/users.py` | 两个取消收藏接口共用递减+删除逻辑 |
 | 前端 API 命名端点统一 | `src/api/index.js` | 27 个文件 88 处字面量调用迁移为命名端点，路径集中管理 |
+| 会话 updated_at 显式刷新 | `api/ai.py` | 插入/删除消息不会触发会话行 `onupdate`，三处消息变更点显式赋值，会话列表"按最新排序"真正生效 |
+| LLM 失败轮次不落库 | `api/ai.py` + `services/ai_service.py` | 失败提示（`AI_ERROR_MSG`）不写消息表也不进对话记忆；流中途失败时剥掉错误尾缀、仅把已流出的真实正文落库并保留进上下文 |
+| Embedding 查询侧失败降级修复 | `services/rag_service.py` `embed_query` | 查询嵌入失败由零向量兜底改为抛异常——零向量在 L2 距离下仍能返回任意结果，"退化为关键词匹配"实际不触发（约束类纯向量链路全量失真）；抛异常后由各通道异常处理正确降级 |
+| RAG 召回最外层兜底 | `services/rag_service.py` `build_recipe_pool_context` | `get_vectorstore()` 初始化失败等穿透 rag_search 内部降级的异常，吞掉后走热门兜底，对话退化为热门推荐而非整轮报错 |
+| 限流器失活 key 清扫 | `core/rate_limit.py` | 每 1000 次检查全量清理 1 小时失活的 IP 桶，避免 `_store` 长期膨胀 |
+| 资料更新走 store action | `stores/user.js` `updateUserInfo` | Profile 页不再直接改写 `userStore.user`，统一经 action 同步 store 与 localStorage |
+| 存在性预言机封堵 | `api/reviews.py` + `api/users.py` | 点评列表对非公开菜谱一律 404（此前遍历 id 可由 200/404 差异枚举未过审菜谱并读到其点评）；手动记录浏览历史接口与收藏口径对齐，仅接受 approved 目标 |
+| 密码强度策略注册/改密共用 | `core/security.py` | `validate_password_strength` 统一校验"≥8 位且含字母与数字"，修改密码不再绕过注册时的强度规则 |
+| 点评软删除后重新点评复用原行 | `api/reviews.py` | 每人每菜谱仅一行；删除后再次点评恢复原行并刷新评分/内容/时间，避免唯一约束阻止重建 |
+| 心得关联菜谱可见性 | `api/cooking_notes.py` | 仅 approved 且未删除的菜谱可被关联；菜谱后续被驳回或软删除时不再回显标题，避免公开心得泄露未公开内容 |
+| 匿名智能搜索限流与入参上限 | `api/recommendations.py` + `schemas/ai.py` | `/query` 匿名可用但按 IP 限流 20 次/分钟；query 1~200 字符、budget 非负，避免匿名刷取 Embedding/精排额度 |
+| 403 不再误清登录态 | `src/api/index.js` | 后端统一异常把 `detail` 置空并放入 `message`；403 仅提示无权限，只有 401（令牌缺失/失效）才清除本地登录态并跳转登录 |
 
 ### 并发安全
 
@@ -243,7 +264,12 @@ python import_data/eval_rerank.py --diagnose --out-prefix eval_scenario
 |--------|------|------|---------|
 | 浏览历史唯一约束 + IntegrityError 兜底 | `models` / `SQL/init.sql` / `utils/browse_history.py` | 数据库唯一索引兜底并发双插，SAVEPOINT 局部回滚 | 并发双击详情（见下） |
 | 收藏并发冲突返回 400 | `api/users.py` | 双击收藏第二个请求返回 400「已收藏」而非 500 | 快速双击收藏按钮 |
+| 点评唯一约束 + IntegrityError 兜底 | `models` / `SQL/init.sql` / `api/reviews.py` | 数据库唯一索引兜底并发重复提交，冲突返回 400「已点评过」；软删除后重新点评复用原行 | 并发提交同一菜谱点评，仅保留一条 |
+| 注册/标签/食材先查后插兜底 | `api/auth.py` / `api/admin.py` | 预检通过后的并发写由 username/email、标签 `(name,type)`、食材 name 唯一约束拦截，捕获 `IntegrityError` 后回查冲突字段并返回 400；标签 type 为 NULL 时 MySQL 唯一索引不参与判断，无数据库兜底（现有表结构限制） | 并发注册同名账号、创建同名食材或同 name+type 标签，后者收到 400 |
+| 邮箱修改竞态兜底 | `api/users.py` `update_profile` | 先查后改存在竞态，并发撞 unique 约束时捕获 `IntegrityError` 返回 400 而非 500 | 两请求同时改同一邮箱，后者收到 400 |
+| 统计缓存防击穿 | `api/stats.py` | 缓存过期瞬间多请求并发时，双重检查锁保证只有一路回源（7 次聚合 COUNT） | 缓存过期瞬间并发请求，日志仅一次统计查询 |
 | Chroma 单例初始化加锁 | `services/rag_service.py` | 线程池双写初始化竞态防护，热路径不加锁 | 高并发下首次请求不报 Chroma 异常 |
+| 向量写入串行锁 | `services/rag_service.py` `_vs_write_lock` | 同一菜谱的并发"先删后插"会互删分块/撞重复 ID；"删除"与"同步"交错会把已删除内容写回索引。同步/删除统一串行，且后台同步执行时复查 approved/is_public 状态 | 编辑菜谱后立即驳回/删除，向量库无残留 |
 
 ### 并发问题手工复现/验证方法
 

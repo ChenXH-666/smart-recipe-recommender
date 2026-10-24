@@ -11,9 +11,11 @@
 
 import json
 import logging
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
+from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from app.database import get_db, SessionLocal
@@ -22,7 +24,9 @@ from app.schemas.ai import AiChatRequest, RewindEditRequest
 from app.schemas.common import SuccessResponse
 from app.core.deps import get_current_user
 from app.core.rate_limit import rate_limit
-from app.services.ai_service import chat_stream, load_memory_from_db, clear_memory, has_memory
+from app.services.ai_service import (
+    chat_stream, load_memory_from_db, clear_memory, has_memory, AI_ERROR_MSG,
+)
 from app.utils.recipe_diet import get_restriction_set
 
 router = APIRouter()
@@ -86,12 +90,11 @@ async def ai_chat(
         content=data.message,
     )
     db.add(user_msg)
+    # 同步刷新会话 updated_at：会话列表按此字段倒序，
+    # 插入 AiMessage 不会触发 AiConversation 的行更新（onupdate 不生效），
+    # 不显式赋值则排序恒等于创建时间
+    conv.updated_at = datetime.now()
     db.commit()
-
-    # 更新会话标题
-    if conv.title is None or conv.title.startswith("新对话"):
-        conv.title = data.message[:50] + ("..." if len(data.message) > 50 else "")
-        db.commit()
 
     # 流式响应：生成器内部创建独立 session，避免依赖注入 session 被提前关闭
     # 忌口过滤：将当前用户忌口标签传入，供 RAG 候选剔除触忌口的菜谱
@@ -99,6 +102,7 @@ async def ai_chat(
 
     async def event_stream():
         full_response = ""
+        llm_failed = False
         try:
             async for chunk in chat_stream(
                 data.message,
@@ -111,11 +115,22 @@ async def ai_chat(
                 yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
         except Exception as e:
             logger.exception(f"AI 流式对话失败: {e}")
-            err_msg = "（AI 服务暂时不可用，请稍后重试）"
-            full_response += err_msg
-            yield f"data: {json.dumps(err_msg, ensure_ascii=False)}\n\n"
+            llm_failed = True
+            yield f"data: {json.dumps(AI_ERROR_MSG, ensure_ascii=False)}\n\n"
 
         yield "data: [DONE]\n\n"
+
+        # 失败提示不落库：错误提示若写入消息表，缓存 miss 重建 memory 时
+        # 会重新进入对话上下文污染语义（前端已实时展示该提示，无需持久化）
+        if llm_failed:
+            return
+        # LLM 流中途失败：ai_service 会先流出部分正文、再以 AI_ERROR_MSG 收尾。
+        # 剥掉错误尾缀后仅把真实生成的正文落库（与 memory 中保留的内容一致）；
+        # 一字未出则整体跳过
+        if full_response.endswith(AI_ERROR_MSG):
+            full_response = full_response[:-len(AI_ERROR_MSG)]
+            if not full_response.strip():
+                return
 
         # 使用独立 session 保存 AI 回复（保存失败不影响已发送给客户端的响应）
         if not full_response.strip():
@@ -128,6 +143,12 @@ async def ai_chat(
                 content=full_response,
             )
             sse_db.add(ai_msg)
+            # 独立 session 中同样需显式刷新会话 updated_at（见上方注释）
+            sse_db.execute(
+                update(AiConversation)
+                .where(AiConversation.id == conversation_id)
+                .values(updated_at=datetime.now())
+            )
             sse_db.commit()
         except Exception as e:
             logger.exception(f"保存 AI 回复失败: {e}")
@@ -187,6 +208,7 @@ def rewind_edit(
         db.query(AiMessage).filter(
             AiMessage.id.in_(ids_to_delete)
         ).delete(synchronize_session=False)
+    conv.updated_at = datetime.now()
     db.commit()
 
     # 重建内存上下文到被编辑消息之前

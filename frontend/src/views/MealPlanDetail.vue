@@ -286,11 +286,9 @@ async function checkFavoriteStatus() {
   if (!userStore.isLoggedIn) return
   try {
     const planId = parseInt(route.params.id)
-    const res = await users.favorites({
-      favorite_type: 'meal_plan', page: 1, page_size: 50,
-    })
-    const items = res.items || []
-    isFaved.value = items.some(it => it.data && it.data.id === planId)
+    // 单条查询接口，避免拉全量收藏列表遍历比对
+    const res = await users.checkFavorite('meal_plan', planId)
+    isFaved.value = !!res.is_favorited
   } catch (e) {
     isFaved.value = false
   }

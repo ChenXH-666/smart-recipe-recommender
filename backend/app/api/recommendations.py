@@ -2,7 +2,7 @@
 
 安全设计：
   - RAG 检索/预算推荐失败均降级到空列表，不阻断主流程
-  - 自然语言推荐接口 (/query) 不需要认证，直接返回候选列表
+  - 自然语言推荐接口 (/query) 不需要认证，但按 IP 限流，避免匿名刷取 Embedding 额度
 """
 
 import logging
@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.schemas.ai import AiRecommendRequest
 from app.core.deps import get_optional_user
+from app.core.rate_limit import rate_limit
 from app.services.recommendation_service import (
     get_personalized_rag_recommendations,
     get_personalized_meal_plans,
@@ -96,13 +97,14 @@ def personalized_meal_plans(
     return {"items": results}
 
 
-@router.post("/query")
+@router.post("/query", dependencies=[Depends(rate_limit(20, 60, "recommend_query"))])
 def recommend_by_query(
     data: AiRecommendRequest,
     db: Session = Depends(get_db),
 ):
     """自然语言智能推荐
 
+    匿名可用，但按 IP 限流 20 次/分钟；query 最长 200 字符、budget 非负。
     容错：RAG 检索失败降级到空列表，不阻断响应
     """
     try:

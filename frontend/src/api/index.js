@@ -42,7 +42,6 @@ api.interceptors.response.use(
   async (error) => {
     const status = error.response?.status
     const url = error.config?.url || ''
-    const detail = (error.response?.data?.detail || '').toString()
 
     const isLoginRequest = url.includes('/auth/login') || url.includes('/auth/register')
 
@@ -52,17 +51,10 @@ api.interceptors.response.use(
     }
 
     if (status === 403 && !isLoginRequest) {
-      const isPermissionDenied =
-        detail.includes('权限') ||
-        detail.includes('admin') ||
-        detail.includes('需要管理员') ||
-        detail.includes('Forbidden')
-
-      if (isPermissionDenied) {
-        ElMessage.error('权限不足，无法执行此操作')
-      } else {
-        await clearAuthAndRedirect()
-      }
+      // 后端统一异常处理把 HTTPException.detail 放入 message、detail 置空；
+      // 403 表示当前操作无权限，令牌失效统一返回 401，因此这里只提示、不清登录态
+      const message = (error.response?.data?.message || error.response?.data?.detail || '').toString()
+      ElMessage.error(message || '权限不足，无法执行此操作')
       return Promise.reject(error)
     }
 
@@ -144,6 +136,11 @@ export const users = {
   updatePreferences: (data) => api.put('/users/preferences', data),
   // 收藏：新增/取消（favoriteType: 'recipe' | 'meal_plan'）
   favorites: (params) => api.get('/users/favorites', { params }),
+  // 单条收藏状态查询（详情页用，避免拉全量列表遍历比对）
+  checkFavorite: (favoriteType, favoriteId) =>
+    api.get('/users/favorites/check', {
+      params: { favorite_type: favoriteType, favorite_id: favoriteId },
+    }),
   addFavorite: (favoriteType, favoriteId) =>
     api.post('/users/favorites', null, {
       params: { favorite_type: favoriteType, favorite_id: favoriteId },
@@ -161,6 +158,8 @@ export const users = {
 
 // AI 模块 —— 对话管理（聊天 SSE 流式请求走 utils/sse.js 的 fetch，不经 axios）
 export const ai = {
+  // SSE 流式对话地址（fetch 原生消费，无法走 axios 拦截器，仅暴露 URL 常量）
+  chatStreamUrl: '/api/ai/chat',
   rewindEdit: (convId, data) =>
     api.post(`/ai/conversations/${convId}/rewind-edit`, data),
   deleteConversation: (convId) => api.delete(`/ai/conversations/${convId}`),

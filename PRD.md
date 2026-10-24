@@ -158,7 +158,7 @@
 |------|---------|---------|--------|
 | FR-REC01 | 个性化推荐 | 已登录用户基于收藏与浏览历史做 RAG 语义推荐；无行为数据的新号按标签轮转走冷启动多样推荐（非空、覆盖多种菜系）；忌口过滤前置到各候选阶段，未登录返回空由前端热门替代 | P0 |
 | FR-REC02 | 预算推荐 | 按用户预算金额筛选菜谱，可选餐次类型过滤；在预算内自动生成 2 菜/3 菜组合（贪心 + 成本剪枝） | P0 |
-| FR-REC03 | 自然语言推荐 | 用户输入自然语言描述，系统通过 RAG 检索菜谱并返回 top-K 候选；用户输入属自写文本，故查询改写默认生效——不含实体词时（如"想给家人做点清淡的"）追加一次 LLM 改写调用（约 1.5s 级，聚焦补全 1~2 个菜名），改写失败自动回退原查询（系统生成的偏好标签查询则显式关闭改写，不产生额外调用） | P0 |
+| FR-REC03 | 自然语言推荐 | 用户输入自然语言描述，系统通过 RAG 检索菜谱并返回 top-K 候选；用户输入属自写文本，故查询改写默认生效——不含实体词时（如"想给家人做点清淡的"）追加一次 LLM 改写调用（约 1.5s 级，聚焦补全 1~2 个菜名），改写失败自动回退原查询（系统生成的偏好标签查询则显式关闭改写，不产生额外调用）；菜谱列表「智能搜索」（`/api/recommendations/query`）匿名可用，按 IP 限流 20 次/分钟，查询 1~200 字符、预算非负 | P0 |
 | FR-REC04 | 流式智能推荐 | 推荐能力统一收敛到右下角「AI 助手」多轮对话（`/api/ai/chat`，对话中借 RAG 检索相关菜谱后由 LLM 流式生成推荐语）与菜谱列表「智能搜索」（`/api/recommendations/query`）两级入口；会话内仅保存用户的真实输入，不落盘内部系统提示词 | P0 |
 
 **验收标准**：
@@ -176,7 +176,7 @@
 | FR-U01 | 用户注册 | 用户名+邮箱+密码注册，密码 bcrypt 哈希存储 | P0 |
 | FR-U02 | 用户登录 | 校验成功后签发 JWT（24h 有效期） | P0 |
 | FR-U03 | 个人信息 | 查看/修改昵称、头像、邮箱 | P1 |
-| FR-U04 | 收藏管理 | 收藏/取消收藏菜谱或套餐，支持列表查看 | P1 |
+| FR-U04 | 收藏管理 | 收藏/取消收藏菜谱或套餐，支持列表查看；详情页可通过 `GET /favorites/check` 查询当前用户对指定对象的收藏状态（仅查本人收藏，不泄露他人数据） | P1 |
 | FR-U05 | 浏览历史 | 自动记录菜谱/套餐浏览历史，支持列表查看 | P1 |
 | FR-U06 | AI 对话历史 | 查看历史会话与消息内容，支持删除与"继续对话" | P1 |
 | FR-U07 | 我的菜谱 | 展示我创建的菜谱（含 pending/rejected 状态与驳回意见），支持编辑/删除/重新提交 | P1 |
@@ -190,7 +190,7 @@
 | 编号 | 功能名称 | 功能描述 | 优先级 |
 |------|---------|---------|--------|
 | FR-I01 | 菜谱点评 | 用户对菜谱发表评分（1-5）与文字评论，支持软删除 | P1 |
-| FR-I02 | 烹饪心得发布 | 用户发布烹饪心得（标题+正文+关联菜谱+图片），可设公开/私有 | P1 |
+| FR-I02 | 烹饪心得发布 | 用户发布烹饪心得（标题+正文+关联菜谱+图片），可设公开/私有；关联菜谱须为已审核通过且未删除，心得不回显未公开菜谱标题 | P1 |
 | FR-I03 | 烹饪心得浏览 | 心得列表与详情页，公开心得自动同步到 RAG 向量库 | P1 |
 | FR-I04 | 套餐创建 | 用户从菜谱库选择多道菜组合成套餐，可设公开/私有 | P1 |
 | FR-I05 | 套餐浏览 | 套餐列表与详情（广场卡片渲染套餐封面图），普通用户提交的套餐需审核后公开 | P1 |
@@ -248,9 +248,9 @@
 
 | 类别 | 要求 |
 |------|------|
-| **密码安全** | 使用 bcrypt 哈希存储，禁止明文存储；注册接口对密码强度做基本校验 |
+| **密码安全** | 使用 bcrypt 哈希存储，禁止明文存储；注册与修改密码共用同一强度策略（≥8 位且同时包含字母与数字） |
 | **身份认证** | JWT 令牌认证，HS256 签名；令牌有效期 24 小时；密钥通过环境变量注入 |
-| **权限控制** | 基于 `role` 字段（user/admin）实现 RBAC；作者权限通过 `author_id` 校验 |
+| **权限控制** | 基于 `role` 字段（user/admin）实现 RBAC；作者权限通过 `author_id` 校验；401 表示未认证（令牌缺失/失效），403 表示已认证但无权限，前端仅对 401 清除登录态 |
 | **接口防护** | 所有写操作要求登录；管理接口要求 admin 角色；用户中心接口校验资源所有权 |
 | **CORS 策略** | 开发期允许所有来源，**生产环境必须配置白名单域名** |
 | **SQL 注入防护** | 全部使用 SQLAlchemy ORM，禁止字符串拼接 SQL |
@@ -267,7 +267,7 @@
 - **查询改写降级**：改写 LLM 调用失败/超时（`RAG_QUERY_REWRITE_TIMEOUT`，默认 10s）、输出为空或与原查询相同、校验不过（含幻觉菜名或丢失预算约束）时静默回退原查询，不改写也不抛异常；未含实体词的查询才触发改写，其余查询零 LLM 开销；可通过 `RAG_QUERY_REWRITE=false` 一键关闭
 - **AI 服务降级**：LLM 流式对话失败时不阻断候选菜谱展示，返回降级提示文案
 - **向量同步容错**：菜谱创建/更新/审核时向量同步以 FastAPI BackgroundTasks 后台执行（不阻塞响应，Embedding 耗时 1~3 秒不拖慢接口）；后台任务自建会话按 ID 重新加载并同步，失败仅记日志不影响主流程，可用全量 rebuild 修复
-- **并发写兜底**：收藏、浏览历史等"先查后插"型写入在并发重复请求（如同一用户双击按钮）下由数据库唯一约束兜底，应用层捕获约束冲突后转为幂等响应（收藏返回 400"已收藏"、浏览记录转为更新时间），并发结果与串行一致，不产生重复数据或 500
+- **并发写兜底**：收藏、浏览历史、注册、邮箱修改、食材创建、点评等"先查后插/先查后改"型写入在并发重复请求（如同一用户双击按钮）下由数据库唯一约束兜底，应用层捕获约束冲突后转为业务响应（收藏返回 400"已收藏"、点评返回 400"已点评过"、浏览记录转为更新时间、注册与邮箱修改返回 400 冲突提示），并发结果与串行一致，不产生重复数据或 500；标签按 `(name,type)` 唯一约束兜底，type 为空时 MySQL 不参与唯一判断，受现有表结构限制无数据库兜底
 - **共享状态线程安全**：Chroma 向量库单例初始化加互斥锁（向量同步线程池与对话检索线程池可能同时首次触发）；对话记忆 LRU、限流器等内存状态均在单事件循环线程内操作，无交错竞态
 - **断点续传**：全量向量库重建支持 checkpoint，中断后可从断点继续，避免重复消耗 API 额度
 - **软删除策略**：菜谱、心得、评论均使用 `is_deleted` 软删除，保护数据完整性
@@ -698,6 +698,7 @@ MRR 0.580、NDCG@12 0.544，场景意图型查询由 0.133→0.500（5 条查询
 | recipes | is_deleted | TINYINT DEFAULT 0（软删除标记） |
 | user_favorites | (user_id, favorite_type, favorite_id) | UNIQUE（防重复收藏） |
 | user_browse_history | (user_id, recipe_id) / (user_id, meal_plan_id) | UNIQUE ×2（防并发双插产生重复浏览记录；NULL 不参与唯一判断，兼容二选一可空列） |
+| recipe_reviews | (user_id, recipe_id) | UNIQUE（每人每菜谱仅一条；软删除后重新点评复用原行，防并发重复提交） |
 | meal_plan_items | (meal_plan_id, recipe_id) | UNIQUE（同一套餐不重复加菜） |
 | ai_messages | role | ENUM('user','assistant','system') |
 
@@ -713,6 +714,7 @@ MRR 0.580、NDCG@12 0.544，场景意图型查询由 0.133→0.500（5 条查询
 | recipes | idx_estimated_cost | estimated_cost | 预算筛选 |
 | user_browse_history | uk_hist_user_recipe / uk_hist_user_plan | (user_id, recipe_id) / (user_id, meal_plan_id) | 防并发重复（部分唯一索引，兼作按用户查询） |
 | user_browse_history | idx_user_id, idx_viewed_at | user_id, viewed_at | 历史查询与热门统计 |
+| recipe_reviews | uk_review_user_recipe | (user_id, recipe_id) | 防并发重复点评（兼作按用户查询） |
 | ai_messages | idx_conversation_id | conversation_id | 会话消息查询 |
 
 ### 7.5 向量库数据结构（Chroma）
@@ -825,13 +827,13 @@ MRR 0.580、NDCG@12 0.544，场景意图型查询由 0.133→0.500（5 条查询
 |------|------|---------|
 | 认证 | `/api/auth` | POST /register, POST /login, GET /me |
 | 菜谱 | `/api/recipes` | GET /, GET /hot, GET /{id}, POST /, PUT /{id}, DELETE /{id} |
-| 用户中心 | `/api/users` | GET/PUT /preferences, PUT /profile, PUT /password, GET/POST /favorites, DELETE /favorites/{id}, DELETE /favorites/by/{type}/{id}, POST/GET /history, GET /conversations, GET /conversations/{id} |
-| 点评 | `/api/reviews` | GET /recipes/{id}, POST /recipes/{id}, DELETE /{id} |
+| 用户中心 | `/api/users` | GET/PUT /preferences, PUT /profile, PUT /password, GET/POST /favorites, GET /favorites/check, DELETE /favorites/{id}, DELETE /favorites/by/{type}/{id}, POST/GET /history, GET /conversations, GET /conversations/{id} |
+| 点评 | `/api/reviews` | GET /recipes/{id}, POST /recipes/{id}（每人每菜谱一条，软删除后重新点评复用原行）, DELETE /{id} |
 | 烹饪心得 | `/api/cooking-notes` | GET /, GET /{id}, POST /, PUT /{id}, DELETE /{id}, GET/POST /{id}/comments, DELETE /comments/{id} |
 | 套餐 | `/api/meal-plans` | GET /, GET /{id}, GET /{id}/shopping-list, POST /, PUT /{id}, DELETE /{id} |
 | 统计 | `/api/stats` | GET /（首页菜谱/套餐/用户总量 + 近 7 天新增） |
 | AI 助手 | `/api/ai` | POST /chat (SSE，按 IP 限流 20次/分钟), POST /conversations/{id}/rewind-edit, DELETE /conversations/{id}（会话列表/详情在 /api/users/conversations） |
-| 智能推荐 | `/api/recommendations` | GET /personalized, GET /meal-plans, GET /prompts, POST /query |
+| 智能推荐 | `/api/recommendations` | GET /personalized, GET /meal-plans, GET /prompts, POST /query（匿名，按 IP 限流 20 次/分钟；query ≤200 字符、budget ≥0） |
 | 后台管理 | `/api/admin` | GET /stats(含 pending_ingredients 待审核食材数), GET/POST/PUT/DELETE /tags(…), GET/POST/PUT/DELETE /ingredients(…)（GET 默认仅返回已审核食材供下拉使用；传 status 参数仅管理员可用，非管理员 403；POST 允许登录用户提交：管理员直接通过/普通用户待审核并记录 submitted_by）, POST /ingredients/{id}/audit, GET /recipes/pending, POST /recipes/{id}/audit, DELETE /recipes/{id}, GET /meal-plans/pending, POST /meal-plans/{id}/audit, DELETE /meal-plans/{id}, GET /users, POST /users/{id}/toggle-active, POST /users/{id}/role |
 | 健康检查 | `/api/health` | GET / |
 
@@ -861,7 +863,7 @@ MRR 0.580、NDCG@12 0.544，场景意图型查询由 0.133→0.500（5 条查询
 | RAG_HYBRID_CONSTRAINT_SKIP_KEYWORD | true | 约束类查询（预算/人数）跳过关键词通道、退化为纯向量召回；false 维持双通道融合（修复约束组回退，论文 6.4.4） |
 | RERANK_ENABLED | true | 精排总开关；失败/超时自动降级为召回排序 |
 | RERANK_MODEL | BAAI/bge-reranker-v2-m3 | SiliconFlow 交叉编码精排模型（复用 Embedding Key） |
-| RERANK_ALPHA | 0.5 | 分数融合权重：α×精排分+(1−α)×召回位置分；0=纯召回序，1=纯精排序（论文实验确定 0.5 为峰值） |
+| RERANK_ALPHA | 0.5 | 分数融合权重：α×精排分+(1−α)×召回位置分；0=纯召回序，1=纯精排序（初始纯向量链路 α 扫描的峰值；最终链路沿用，复扫见论文表 6-14 末四行） |
 | RAG_QUERY_REWRITE | true | 查询改写开关：无实体词查询经 LLM 聚焦补全 1~2 个菜名，与原查询双路召回 RRF 融合；false 关闭（零 LLM 调用） |
 | RAG_QUERY_REWRITE_TIMEOUT | 10 | 改写 LLM 调用超时（秒），超时/失败/校验不过静默回退原查询 |
 | RAG_RERANK_QUERY_REWRITE | true | 精排打分查询：改写生效时取"原查询＋改写文本"拼接（未触发/回退仍用原查询）；false 维持精排恒用原查询（修复"口语化查询下相关菜被打低分压出前12"，论文 6.4.5） |

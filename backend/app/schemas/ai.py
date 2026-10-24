@@ -18,9 +18,12 @@ class RewindEditRequest(BaseModel):
 
 
 class AiRecommendRequest(BaseModel):
-    """智能推荐请求 —— 支持自然语言查询 + 预算 + 餐次筛选"""
-    query: str = Field(..., min_length=1)
-    budget: Optional[float] = None
+    """智能推荐请求 —— 支持自然语言查询 + 预算 + 餐次筛选
+
+    query 限制 200 字符、budget 必须非负，避免超长输入放大 Embedding/精排开销。
+    """
+    query: str = Field(..., min_length=1, max_length=200)
+    budget: Optional[float] = Field(None, ge=0)
     meal_type: Optional[str] = None
 
 

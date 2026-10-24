@@ -5,6 +5,7 @@
   - 浏览数+1 使用原子 UPDATE 语句，避免并发计数异常
   - 心得评论同样使用 joinedload(CookingNoteComment.user) 优化查询
   - 软删除策略，保护数据完整性
+  - 关联菜谱仅允许 approved 且未删除，避免公开心得泄露未过审内容标题
 """
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
@@ -33,7 +34,8 @@ def _enrich_note(note: CookingNote) -> CookingNoteOut:
     if note.user:
         item.username = note.user.nickname or note.user.username
         item.author_avatar_url = note.user.avatar_url
-    if note.recipe:
+    # 菜谱可能在心得发布后被驳回/软删除，此时不再回显标题，避免公开心得泄露未公开内容
+    if note.recipe and note.recipe.status == "approved" and note.recipe.is_deleted == 0:
         item.related_recipe_title = note.recipe.title
     return item
 
@@ -146,15 +148,17 @@ def create_note(
     current_user=Depends(get_current_user),
 ):
     """创建心得"""
-    # 校验关联菜谱存在且未删除（如果传了 related_recipe_id）
+    # 校验关联菜谱存在、未删除且已公开（approved）——心得会回显菜谱标题，
+    # 不能借此暴露未过审/已下架菜谱
     if data.related_recipe_id is not None:
         from app.models import Recipe
         recipe = db.query(Recipe).filter(
             Recipe.id == data.related_recipe_id,
             Recipe.is_deleted == 0,
+            Recipe.status == "approved",
         ).first()
         if not recipe:
-            raise HTTPException(status_code=400, detail="关联菜谱不存在")
+            raise HTTPException(status_code=400, detail="关联菜谱不存在或未通过审核")
 
     note = CookingNote(
         user_id=current_user.id,
@@ -193,16 +197,17 @@ def update_note(
     if not note:
         raise HTTPException(status_code=404, detail="心得不存在或无权操作")
 
-    # 如果修改了关联菜谱，校验其存在性
+    # 如果修改了关联菜谱，校验其存在、未删除且已公开（approved）
     new_recipe_id = data.related_recipe_id
     if new_recipe_id is not None:
         from app.models import Recipe
         recipe = db.query(Recipe).filter(
             Recipe.id == new_recipe_id,
             Recipe.is_deleted == 0,
+            Recipe.status == "approved",
         ).first()
         if not recipe:
-            raise HTTPException(status_code=400, detail="关联菜谱不存在")
+            raise HTTPException(status_code=400, detail="关联菜谱不存在或未通过审核")
 
     update_data = data.model_dump(exclude_unset=True)
     for key, value in update_data.items():

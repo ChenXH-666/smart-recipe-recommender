@@ -46,6 +46,12 @@ class _SlidingWindowLimiter:
         self._store: Dict[str, Deque[float]] = defaultdict(deque)
         # asyncio.Lock 在首次事件循环中创建，避免 "no running event loop" 警告
         self._lock = None
+        # 周期性清扫计数器：每 _SWEEP_INTERVAL 次检查全量清理一次失活 key
+        self._checks = 0
+
+    _SWEEP_INTERVAL = 1000
+    # key 超过 1 小时无新请求即视为失活（远大于任何限流窗口），可安全移除
+    _STALE_AFTER = 3600
 
     def _get_lock(self):
         """惰性创建 asyncio.Lock，绑定到当前运行的事件循环"""
@@ -89,9 +95,14 @@ class _SlidingWindowLimiter:
             # 记录本次请求
             bucket.append(now)
 
-            # 惰性清理空队列，避免 _store 无限增长
-            if not bucket:
-                self._store.pop(key, None)
+            # 周期性全量清扫：失活 key 的时间戳只有在其再次请求时才会被惰性剔除，
+            # 长期运行会积累大量不再活跃的 IP；每 _SWEEP_INTERVAL 次检查清扫一次
+            self._checks += 1
+            if self._checks >= self._SWEEP_INTERVAL:
+                self._checks = 0
+                stale_before = now - self._STALE_AFTER
+                for k in [k for k, b in self._store.items() if b[-1] < stale_before]:
+                    self._store.pop(k, None)
 
 
 # 全局单例 —— 模块级实例化，所有请求共享同一限流状态

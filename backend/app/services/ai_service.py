@@ -57,6 +57,9 @@ settings = get_settings()
 #         会话（历史仍在数据库，切换会话时会从 DB 重新加载，不丢数据），
 #         避免长期运行下无界增长导致内存泄漏
 _MAX_ACTIVE_MEMORIES = 256
+
+# LLM 调用失败时对用户返回的统一提示（ai.py 据此判断错误提示不落库、不写上下文）
+AI_ERROR_MSG = "抱歉，AI 服务暂时不可用，请稍后重试。"
 _conversation_memories: "OrderedDict[int, ConversationBufferMemory]" = OrderedDict()
 
 
@@ -302,9 +305,13 @@ async def chat_stream(
         # 完整异常只写日志；对用户仅返回通用提示，
         # 避免把内部 URL / API Key 片段等信息泄露到前端
         logger.exception(f"LLM 调用失败: {e}")
-        error_msg = "抱歉，AI 服务暂时不可用，请稍后重试。"
-        yield error_msg
-        full_response = error_msg
+        # 已流出的部分正文是真实模型输出，保留进上下文；错误提示本身不进 memory，
+        # 否则后续每轮都会把"AI 服务暂时不可用"当作历史回答发给模型，污染语义
+        if full_response.strip():
+            memory.chat_memory.add_user_message(message)
+            memory.chat_memory.add_ai_message(full_response)
+        yield AI_ERROR_MSG
+        return
 
     # 保存到 memory（用于后续对话上下文）
     memory.chat_memory.add_user_message(message)

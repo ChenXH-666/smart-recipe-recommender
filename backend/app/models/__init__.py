@@ -289,6 +289,10 @@ class RecipeReview(Base):
     recipe = relationship("Recipe", back_populates="reviews")
     user = relationship("User", back_populates="reviews")
 
+    __table_args__ = (
+        UniqueConstraint("user_id", "recipe_id", name="uk_review_user_recipe"),
+    )
+
 
 class CookingNote(Base):
     """烹饪心得表 —— 用户分享烹饪体验，可关联菜谱，支持图片集（JSON数组）"""

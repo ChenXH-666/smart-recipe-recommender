@@ -25,9 +25,11 @@
   3. JWT 有效期默认 24 小时，适合长时间登录体验
 """
 
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from fastapi import HTTPException
 from passlib.context import CryptContext
 from jose import jwt, JWTError
 
@@ -37,6 +39,23 @@ settings = get_settings()
 
 # 密码哈希上下文 —— bcrypt 算法，schemes 列表支持算法平滑升级
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+
+def validate_password_strength(password: str) -> None:
+    """
+    密码强度校验 —— 注册与修改密码共用，规则与 PRD 3.2 节一致
+
+    规则：
+      - 长度 ≥ 8
+      - 必须包含至少一个字母
+      - 必须包含至少一个数字
+    """
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="密码长度至少 8 位")
+    if not re.search(r"[A-Za-z]", password):
+        raise HTTPException(status_code=400, detail="密码必须包含至少一个字母")
+    if not re.search(r"\d", password):
+        raise HTTPException(status_code=400, detail="密码必须包含至少一个数字")
 
 
 def hash_password(password: str) -> str:

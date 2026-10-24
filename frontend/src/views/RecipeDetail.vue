@@ -338,7 +338,7 @@ import { ElMessage } from 'element-plus'
 import { useUserStore } from '../stores/user'
 import { useRecipeCartStore } from '../stores/recipeCart'
 import { User } from '@element-plus/icons-vue'
-import { recipes, users, reviews as reviewsApi, admin } from '../api'
+import { recipes, users, reviews as reviewsApi, admin, cookingNotes as cookingNotesApi } from '../api'
 
 const route = useRoute()
 const cart = useRecipeCartStore()
@@ -447,14 +447,22 @@ async function loadReviews() {
 async function checkFavoriteStatus() {
   if (!userStore.isLoggedIn) return
   try {
-    const recipeId = parseInt(route.params.id)
-    // 拉取用户收藏列表（菜谱类型），检查当前 recipe.id 是否在内
-    const res = await users.favorites({ favorite_type: 'recipe', page: 1, page_size: 50 })
-    const items = res.items || []
-    isFaved.value = items.some(it => it.data && it.data.id === recipeId)
+    // 单条查询接口，避免拉全量收藏列表遍历比对
+    const res = await users.checkFavorite('recipe', parseInt(route.params.id))
+    isFaved.value = !!res.is_favorited
   } catch (e) {
-    // 拉取失败不影响页面渲染，默认未收藏
+    // 查询失败不影响页面渲染，默认未收藏
     isFaved.value = false
+  }
+}
+
+// 加载关联本菜谱的烹饪心得（侧边栏「相关心得」卡片，无数据时卡片自动隐藏）
+async function loadRelatedNotes() {
+  try {
+    const res = await cookingNotesApi.list({ recipe_id: parseInt(route.params.id), page: 1, page_size: 5 })
+    relatedNotes.value = res.items || []
+  } catch (e) {
+    console.error('加载相关心得失败:', e)
   }
 }
 
@@ -502,6 +510,7 @@ onMounted(async () => {
   // 菜谱不存在时无需加载点评/收藏，避免控制台报 404/422 错误
   if (!recipe.value) return
   loadReviews()
+  loadRelatedNotes()
   // 登录用户：检查收藏状态（浏览历史已由后端 GET 详情接口自动记录，
   // 前端不再手动 POST /users/history——否则与后端自动记录双写并发，
   // 在无唯一约束的库上会产生重复浏览记录，导致"看好几次"虚高）

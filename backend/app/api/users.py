@@ -24,7 +24,7 @@ from app.schemas.interaction import MealPlanListOut
 from app.schemas.ai import AiConversationOut, AiConversationDetailOut
 from app.schemas.common import PaginatedResponse, SuccessResponse
 from app.core.deps import get_current_user
-from app.core.security import verify_password, hash_password
+from app.core.security import verify_password, hash_password, validate_password_strength
 from app.utils.browse_history import upsert_browse_history
 
 router = APIRouter()
@@ -134,7 +134,13 @@ def update_profile(
         current_user.email = data.email
     if data.avatar_url is not None:
         current_user.avatar_url = data.avatar_url
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # 并发兜底：先查后改存在竞态，两请求可能同时通过上方唯一性校验，
+        # 由数据库 unique 约束拦截，转为业务错误而非 500
+        db.rollback()
+        raise HTTPException(status_code=400, detail="邮箱已被其他用户注册")
     db.refresh(current_user)
     return UserInfo.model_validate(current_user)
 
@@ -145,11 +151,13 @@ def change_password(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    """修改密码 —— 需验证原密码，且新密码不能与原密码相同"""
+    """修改密码 —— 需验证原密码、新密码强度符合策略，且不能与原密码相同"""
     if not verify_password(data.old_password, current_user.password_hash):
         raise HTTPException(status_code=400, detail="原密码错误")
     if data.old_password == data.new_password:
         raise HTTPException(status_code=400, detail="新密码不能与原密码相同")
+    # 与注册共用同一套强度规则，避免绕过前端校验设置弱密码
+    validate_password_strength(data.new_password)
     current_user.password_hash = hash_password(data.new_password)
     db.commit()
     return SuccessResponse(message="密码修改成功")
@@ -246,6 +254,26 @@ def remove_favorite_by_item(
 
     _delete_favorite_and_sync_count(db, fav)
     return SuccessResponse(message="已取消收藏")
+
+
+@router.get("/favorites/check")
+def check_favorite(
+    favorite_type: str = Query(..., pattern="^(recipe|meal_plan)$"),
+    favorite_id: int = Query(..., ge=1),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    """单条收藏状态查询 —— 详情页判断是否已收藏。
+
+    替代前端"拉取全量收藏列表再遍历比对"的做法，
+    收藏数大时可避免传输与遍历开销。
+    """
+    exists = db.query(UserFavorite).filter_by(
+        user_id=current_user.id,
+        favorite_type=favorite_type,
+        favorite_id=favorite_id,
+    ).first() is not None
+    return {"is_favorited": exists}
 
 
 @router.get("/favorites", response_model=PaginatedResponse)
@@ -356,21 +384,25 @@ def record_browse_history(
             detail="recipe_id 和 meal_plan_id 不能同时传",
         )
 
-    # 校验对应对象存在
+    # 校验对应对象存在且已公开（与收藏接口口径一致）：
+    # 只对 approved 目标返回 200、否则统一 400——若只查存在性，
+    # 遍历 id 即可通过 200/400 差异枚举出未过审内容（存在性预言机）
     if recipe_id is not None:
         obj = db.query(Recipe).filter(
             Recipe.id == recipe_id,
             Recipe.is_deleted == 0,
+            Recipe.status == "approved",
         ).first()
         if not obj:
-            raise HTTPException(status_code=400, detail="菜谱不存在")
+            raise HTTPException(status_code=400, detail="菜谱不存在或未通过审核")
     else:
         obj = db.query(MealPlan).filter(
             MealPlan.id == meal_plan_id,
             MealPlan.is_deleted == 0,
+            MealPlan.status == "approved",
         ).first()
         if not obj:
-            raise HTTPException(status_code=400, detail="套餐不存在")
+            raise HTTPException(status_code=400, detail="套餐不存在或未通过审核")
 
     # 去重写入：单用户单对象只保留最近一条记录（公共 upsert，与菜谱详情页共用）
     upsert_browse_history(

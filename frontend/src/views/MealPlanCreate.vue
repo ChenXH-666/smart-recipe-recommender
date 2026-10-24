@@ -142,7 +142,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, watch, onMounted } from 'vue'
+import { ref, reactive, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { recipes, mealPlans, users } from '../api'
@@ -219,7 +219,16 @@ const selectRecipeOptions = computed(() => {
   }
   return recipeOptions.value
 })
-async function remoteSearchRecipe(query) {
+// 远程搜索防抖：el-select 的 remote-method 每键入一个字符都会触发，
+// 不加防抖会高频打后端；300ms 停顿后再发请求
+let searchTimer = null
+function remoteSearchRecipe(query) {
+  if (searchTimer) clearTimeout(searchTimer)
+  searchTimer = setTimeout(() => doSearchRecipe(query), 300)
+}
+// 组件卸载时清理防抖定时器，避免卸载后回调触发搜索
+onUnmounted(() => { if (searchTimer) clearTimeout(searchTimer) })
+async function doSearchRecipe(query) {
   const kw = String(query || '').trim()
   recipeSearchLoading.value = true
   try {

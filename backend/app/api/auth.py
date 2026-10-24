@@ -12,13 +12,16 @@
 import re
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import User
 from app.schemas.user import UserRegister, UserLogin, TokenResponse, UserInfo
 from app.schemas.common import SuccessResponse
-from app.core.security import hash_password, verify_password, create_access_token
+from app.core.security import (
+    hash_password, verify_password, create_access_token, validate_password_strength,
+)
 from app.core.deps import get_current_user
 from app.core.rate_limit import rate_limit
 
@@ -27,23 +30,6 @@ router = APIRouter()
 # 用于时序攻击防护的假密码哈希 —— 用户不存在时执行一次假验证，避免时间差异泄露用户存在性。
 # 使用 hash_password 生成合法格式的 bcrypt 哈希，确保 verify_password 正常返回 False。
 _DUMMY_PASSWORD_HASH = hash_password("timing-attack-dummy-password")
-
-
-def _validate_password_strength(password: str) -> None:
-    """
-    密码强度校验 —— PRD 3.2 节要求"对密码强度做基本校验"
-
-    规则：
-      - 长度 ≥ 8
-      - 必须包含至少一个字母
-      - 必须包含至少一个数字
-    """
-    if len(password) < 8:
-        raise HTTPException(status_code=400, detail="密码长度至少 8 位")
-    if not re.search(r"[A-Za-z]", password):
-        raise HTTPException(status_code=400, detail="密码必须包含至少一个字母")
-    if not re.search(r"\d", password):
-        raise HTTPException(status_code=400, detail="密码必须包含至少一个数字")
 
 
 def _validate_username(username: str) -> None:
@@ -68,8 +54,8 @@ def register(data: UserRegister, db: Session = Depends(get_db)):
     """
     # 用户名校验
     _validate_username(data.username)
-    # 密码强度校验
-    _validate_password_strength(data.password)
+    # 密码强度校验（与修改密码共用同一套规则）
+    validate_password_strength(data.password)
 
     # 检查用户名是否已存在
     if db.query(User).filter(User.username == data.username).first():
@@ -84,7 +70,17 @@ def register(data: UserRegister, db: Session = Depends(get_db)):
         password_hash=hash_password(data.password),
     )
     db.add(user)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # 并发兜底：两个请求同时通过上方预检时由 users 表的 username/email
+        # 唯一约束拦截。回查冲突字段后返回与串行路径一致的业务错误，避免 500。
+        db.rollback()
+        if db.query(User).filter(User.username == data.username).first():
+            raise HTTPException(status_code=400, detail="用户名已存在")
+        if db.query(User).filter(User.email == data.email).first():
+            raise HTTPException(status_code=400, detail="邮箱已被注册")
+        raise HTTPException(status_code=400, detail="用户名或邮箱已存在")
     db.refresh(user)
     return SuccessResponse(message="注册成功", id=user.id)
 

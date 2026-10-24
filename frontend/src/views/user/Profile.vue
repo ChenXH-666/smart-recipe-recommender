@@ -170,8 +170,7 @@ async function updateProfile() {
       email: profileForm.email,
       avatar_url: profileForm.avatar_url,
     })
-    userStore.user = { ...userStore.user, ...res }
-    localStorage.setItem('user', JSON.stringify(userStore.user))
+    userStore.updateUserInfo(res)
     ElMessage.closeAll()
     ElMessage.success('资料更新成功')
     profileRef.value.clearValidate()

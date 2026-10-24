@@ -8,6 +8,7 @@
 明细数据变化最迟 60 秒后反映到统计卡片，对该粒度展示无感知影响。
 """
 
+import threading
 import time
 from datetime import datetime, timedelta
 
@@ -23,6 +24,8 @@ router = APIRouter()
 # 统计缓存：{data: 统计结果, expires_at: 过期时间（time.monotonic）}
 _STATS_TTL_SECONDS = 60
 _stats_cache: dict = {"data": None, "expires_at": 0.0}
+# 防止缓存过期瞬间多请求并发击穿到数据库（7 次聚合 COUNT）
+_stats_lock = threading.Lock()
 
 
 @router.get("")
@@ -33,42 +36,49 @@ def home_stats(db: Session = Depends(get_db)):
     if cached is not None and now < _stats_cache["expires_at"]:
         return cached
 
-    week_ago = datetime.now() - timedelta(days=7)
+    with _stats_lock:
+        # 双重检查：等待锁期间可能已有其他线程刷新了缓存
+        now = time.monotonic()
+        cached = _stats_cache["data"]
+        if cached is not None and now < _stats_cache["expires_at"]:
+            return cached
 
-    total_recipes = db.query(func.count(Recipe.id)).filter(
-        Recipe.status == "approved", Recipe.is_deleted == 0
-    ).scalar() or 0
-    new_recipes_week = db.query(func.count(Recipe.id)).filter(
-        Recipe.status == "approved",
-        Recipe.is_deleted == 0,
-        Recipe.created_at >= week_ago,
-    ).scalar() or 0
+        week_ago = datetime.now() - timedelta(days=7)
 
-    total_meal_plans = db.query(func.count(MealPlan.id)).filter(
-        MealPlan.status == "approved",
-        MealPlan.is_deleted == 0,
-        MealPlan.is_public == 1,
-    ).scalar() or 0
-    new_meal_plans_week = db.query(func.count(MealPlan.id)).filter(
-        MealPlan.status == "approved",
-        MealPlan.is_deleted == 0,
-        MealPlan.is_public == 1,
-        MealPlan.created_at >= week_ago,
-    ).scalar() or 0
+        total_recipes = db.query(func.count(Recipe.id)).filter(
+            Recipe.status == "approved", Recipe.is_deleted == 0
+        ).scalar() or 0
+        new_recipes_week = db.query(func.count(Recipe.id)).filter(
+            Recipe.status == "approved",
+            Recipe.is_deleted == 0,
+            Recipe.created_at >= week_ago,
+        ).scalar() or 0
 
-    total_users = db.query(func.count(User.id)).scalar() or 0
-    new_users_week = db.query(func.count(User.id)).filter(
-        User.created_at >= week_ago
-    ).scalar() or 0
+        total_meal_plans = db.query(func.count(MealPlan.id)).filter(
+            MealPlan.status == "approved",
+            MealPlan.is_deleted == 0,
+            MealPlan.is_public == 1,
+        ).scalar() or 0
+        new_meal_plans_week = db.query(func.count(MealPlan.id)).filter(
+            MealPlan.status == "approved",
+            MealPlan.is_deleted == 0,
+            MealPlan.is_public == 1,
+            MealPlan.created_at >= week_ago,
+        ).scalar() or 0
 
-    result = {
-        "total_recipes": total_recipes,
-        "new_recipes_week": new_recipes_week,
-        "total_meal_plans": total_meal_plans,
-        "new_meal_plans_week": new_meal_plans_week,
-        "total_users": total_users,
-        "new_users_week": new_users_week,
-    }
-    _stats_cache["data"] = result
-    _stats_cache["expires_at"] = now + _STATS_TTL_SECONDS
-    return result
+        total_users = db.query(func.count(User.id)).scalar() or 0
+        new_users_week = db.query(func.count(User.id)).filter(
+            User.created_at >= week_ago
+        ).scalar() or 0
+
+        result = {
+            "total_recipes": total_recipes,
+            "new_recipes_week": new_recipes_week,
+            "total_meal_plans": total_meal_plans,
+            "new_meal_plans_week": new_meal_plans_week,
+            "total_users": total_users,
+            "new_users_week": new_users_week,
+        }
+        _stats_cache["data"] = result
+        _stats_cache["expires_at"] = now + _STATS_TTL_SECONDS
+        return result
