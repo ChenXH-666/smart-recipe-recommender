@@ -35,7 +35,7 @@ def main():
     parser.add_argument(
         "--from-scratch",
         action="store_true",
-        help="从头重建，忽略 checkpoint 并清空已有集合",
+        help="忽略 checkpoint 重新编码全部可见内容，全部成功后清理旧分块（须停止其他索引写入）",
     )
     args = parser.parse_args()
 

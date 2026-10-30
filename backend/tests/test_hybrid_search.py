@@ -161,6 +161,16 @@ class TestHybridSearch:
         res = rag._hybrid_search(empty_vs, "红烧肉", top_k=3, filter_source_type="recipe")
         assert [r["source_id"] for r in res] == [3]
 
+    def test_keyword_channel_exception_degrades_to_vector(self, monkeypatch):
+        # BM25 通道抛异常（而非仅索引为空）→ 仍返回向量通道结果
+        def boom(*a, **k):
+            raise RuntimeError("bm25 broken")
+
+        monkeypatch.setattr(rag, "_bm25_keyword_search", boom)
+        vs = _fake_vs(self.DOCS, sim_docs=[self.DOCS[0]])
+        res = rag._hybrid_search(vs, "清蒸鲈鱼", top_k=3, filter_source_type="recipe")
+        assert [r["source_id"] for r in res] == [1]
+
     def test_result_structure(self):
         vs = _fake_vs(self.DOCS, sim_docs=[self.DOCS[0]])
         res = rag._hybrid_search(vs, "清蒸鲈鱼", top_k=3, filter_source_type="recipe")
@@ -305,6 +315,7 @@ class TestKwIndexInvalidation:
 
         class _FakeVS:
             _collection = SimpleNamespace(
+                get=lambda **kwargs: {"ids": []},
                 delete=lambda where=None, ids=None: None,
             )
 
@@ -320,3 +331,45 @@ class TestKwIndexInvalidation:
         rag.sync_recipe_to_chroma(recipe)
         assert added == ["recipe_99_0"]
         assert rag._kw_index is None
+
+
+# ------------------------------ 单查询召回的降级路径 ------------------------------
+
+class TestSingleQueryRecall:
+    """_single_query_recall：混合检索命中/空结果时的向量检索调用次数。"""
+
+    DOCS = [
+        ("菜谱：清蒸鲈鱼", {"source_type": "recipe", "source_id": 1,
+                          "title": "清蒸鲈鱼", "tags": ""}),
+    ]
+
+    def test_hybrid_hit_does_not_retry_vector_search(self):
+        vs = _fake_vs(self.DOCS, sim_docs=self.DOCS)
+        calls = []
+        original = vs.similarity_search
+
+        def counting(q, k=None, filter=None):
+            calls.append(1)
+            return original(q, k=k, filter=filter)
+
+        vs.similarity_search = counting
+        res = rag._single_query_recall(vs, "清蒸鲈鱼", 3, "recipe", hybrid=True)
+        assert [r["source_id"] for r in res] == [1]
+        assert len(calls) == 1
+
+    def test_empty_hybrid_does_not_repeat_vector_search(self):
+        calls = []
+
+        def empty_search(q, k=None, filter=None):
+            calls.append(1)
+            return []
+
+        vs = SimpleNamespace(
+            _collection=SimpleNamespace(
+                get=lambda include=None, **k: {"documents": [], "metadatas": []}
+            ),
+            similarity_search=empty_search,
+        )
+        res = rag._single_query_recall(vs, "不存在的菜", 3, "recipe", hybrid=True)
+        assert res == []
+        assert len(calls) == 1

@@ -70,7 +70,7 @@ RAG (Retrieval-Augmented Generation) 服务 —— 向量构建、混合检索�
   - 菜谱/心得创建时自动同步到向量库（实时增量）
   - 全量重建函数 rebuild_vectorstore() 用于初始化或数据修复
   - 全量重建支持断点续传：按批次编码，每批次成功后记录 checkpoint，失败终止并保留进度
-  - 先删旧文档再插入新文档，保证幂等性
+  - 先 upsert 新分块，成功后再清理过期分块，失败不主动删除原分块
 
 【文档数据结构】
   每条向量文档包含：
@@ -109,11 +109,7 @@ settings = get_settings()
 _vectorstore: Optional[Chroma] = None
 _vs_lock = threading.Lock()
 
-# 向量写入串行锁：sync_*_to_chroma 采用"先删后插"且分块 ID 固定
-# （recipe_{id}_{i}），同一菜谱的两次后台同步（如编辑后立即审核通过）
-# 并发交错会导致 delete 打掉对方刚写入的分块、或 add 撞重复 ID 报错。
-# 写入方是低频后台任务，全局串行化即可消除该竞态（Embedding 耗时
-# 本就在后台线程，不影响请求响应）。
+# 同进程写入与清理串行，避免两次更新相互删除分块。
 _vs_write_lock = threading.Lock()
 
 # 文本分割器 —— 在中文语义边界处进行切割
@@ -125,105 +121,61 @@ _text_splitter = RecursiveCharacterTextSplitter(
 
 
 class SiliconFlowEmbeddings(Embeddings):
-    """
-    SiliconFlow Embedding API 封装，实现 LangChain Embeddings 接口。
-
-    使用 BGE-M3 模型，通过 HTTP API 调用 SiliconFlow 的 embedding 服务。
-    每次调用将文本批量发送，返回对应的 1024 维浮点向量列表。
-
-    【容错设计】
-      - 文档批量嵌入（embed_documents）：API 失败时记录错误并返回零向量兜底，
-        保证导入/同步任务不中断（该批分块仅丢失向量信号，文本仍入 BM25 索引）
-      - 查询嵌入（embed_query）：失败直接抛异常，由召回通道的异常处理
-        降级为纯关键词检索——零向量在此无效（见 embed_query 注释）
-    """
-
-    # 兜底零向量维度（与 BGE-M3 输出一致：1024）
-    _FALLBACK_DIM = 1024
+    """SiliconFlow 嵌入接口：校验失败即抛错，不以零向量覆盖有效索引。"""
 
     def __init__(self):
         self.api_url = settings.EMBEDDING_API_URL
         self.api_key = settings.EMBEDDING_API_KEY
         self.model = settings.EMBEDDING_MODEL
 
-    def _embed(
-        self, texts: List[str], raise_on_error: bool = False
-    ) -> List[List[float]]:
-        """
-        调用 Embedding API 获取文本向量。
-
-        为避免单次请求过大或 API 额度耗尽，内部按 RAG_EMBEDDING_BATCH_SIZE
-        分批次调用。失败行为：
-          - raise_on_error=False（默认）：返回零向量兜底，保证 RAG 检索不中断
-          - raise_on_error=True：立即抛出异常，供断点续传场景使用
-        """
+    def _embed(self, texts: List[str]) -> List[List[float]]:
         if not texts:
             return []
 
         batch_size = settings.RAG_EMBEDDING_BATCH_SIZE
         if batch_size <= 0:
             batch_size = len(texts)
-
         headers = {
             "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         }
-
+        dimension = 1024 if self.model == "BAAI/bge-m3" else None
         all_embeddings: List[List[float]] = []
-        total = len(texts)
-
-        for start in range(0, total, batch_size):
+        for start in range(0, len(texts), batch_size):
             batch = texts[start:start + batch_size]
-            payload = {
-                "model": self.model,
-                "input": batch
-            }
-
-            try:
-                response = requests.post(
-                    self.api_url, json=payload, headers=headers, timeout=30
-                )
-                response.raise_for_status()
-                data = response.json()
-                batch_embeddings = [item["embedding"] for item in data["data"]]
-                all_embeddings.extend(batch_embeddings)
-                logger.debug(
-                    f"Embedding 批次完成 {min(start + batch_size, total)}/{total}"
-                )
-            except Exception as e:
-                logger.error(
-                    f"SiliconFlow 嵌入 API 调用失败（批次 {start}-{start + len(batch)}）: {e}"
-                )
-                if raise_on_error:
-                    raise
-                logger.warning("将使用零向量兜底（推荐结果将退化为关键词匹配）。")
-                # 兜底：剩余未编码的全部用零向量填充，保持返回数量与输入一致
-                all_embeddings.extend([[0.0] * self._FALLBACK_DIM for _ in batch])
-                # 后续批次不再请求，直接补零
-                remaining = total - start - len(batch)
-                if remaining > 0:
-                    all_embeddings.extend(
-                        [[0.0] * self._FALLBACK_DIM for _ in range(remaining)]
-                    )
-                break
-
+            response = requests.post(
+                self.api_url, json={"model": self.model, "input": batch},
+                headers=headers, timeout=30,
+            )
+            response.raise_for_status()
+            items = response.json()["data"]
+            if not isinstance(items, list) or len(items) != len(batch):
+                raise ValueError("Embedding 响应条数与输入不匹配")
+            indices = [item.get("index") if isinstance(item, dict) else None for item in items]
+            if (any(type(index) is not int for index in indices)
+                    or sorted(indices) != list(range(len(batch)))):
+                raise ValueError("Embedding 响应索引必须完整且唯一")
+            for item in sorted(items, key=lambda item: item["index"]):
+                vector = item.get("embedding")
+                if not isinstance(vector, list) or not vector:
+                    raise ValueError("Embedding 向量必须为非空数组")
+                if dimension is None:
+                    dimension = len(vector)
+                if len(vector) != dimension:
+                    raise ValueError(f"Embedding 向量维度不匹配，期望 {dimension}")
+                if any(type(value) not in (int, float) or not math.isfinite(value)
+                       for value in vector):
+                    raise ValueError("Embedding 向量必须由有限数值组成")
+                if not any(vector):
+                    raise ValueError("Embedding 不接受零向量")
+                all_embeddings.append(vector)
         return all_embeddings
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
-        """嵌入文档列表（LangChain 批量接口）"""
         return self._embed(texts)
 
     def embed_query(self, text: str) -> List[float]:
-        """嵌入单个查询文本（LangChain 单条接口）。
-
-        查询侧失败必须抛异常而非零向量兜底：零向量不会触发上层
-        "向量搜索无结果→关键词兜底"分支（L2 距离下零向量仍能返回
-        按向量范数排序的任意结果），混合路径的 RRF 会把这些垃圾排序
-        与 BM25 结果融合，约束类查询（纯向量链路）更是直接全量失真。
-        抛异常后由各召回通道的 try/except 捕获，退化为关键词通道，
-        与文档声明的降级行为一致。
-        """
-        return self._embed([text], raise_on_error=True)[0]
+        return self._embed([text])[0]
 
 
 def _get_embedding_model():
@@ -305,18 +257,21 @@ def _build_note_text(note) -> str:
 
 
 def _delete_chunks_by_prefix(vs, source_type: str, source_id: int):
-    """
-    按 source_type+source_id 删除所有相关分块（修复 doc_id 不匹配导致删除失效的问题）。
+    vs._collection.delete(where={"$and": [
+        {"source_type": source_type}, {"source_id": source_id},
+    ]})
 
-    早期实现只删除 `recipe_{id}` 单一 ID，但实际写入时分块 ID 为 `recipe_{id}_{i}`，
-    导致旧分块无法清除，向量库会累积脏数据。
 
-    本函数通过 metadata where 条件按 source_type+source_id 批量删除，保证幂等性。
-    """
-    try:
-        vs._collection.delete(where={"source_type": source_type, "source_id": source_id})
-    except Exception as e:
-        logger.debug(f"按 metadata 删除旧分块失败（可能本就没有旧数据）: {e}")
+def _upsert_source_chunks(vs, source_type, source_id, chunks, metadatas, ids):
+    old_ids = set(vs._collection.get(
+        where={"$and": [{"source_type": source_type}, {"source_id": source_id}]},
+        include=[],
+    )["ids"])
+    # add_texts 先完成整组嵌入再 upsert；失败时不删除原分块。
+    vs.add_texts(chunks, metadatas=metadatas, ids=ids)
+    stale_ids = sorted(old_ids - set(ids))
+    if stale_ids:
+        vs._collection.delete(ids=stale_ids)
 
 
 def remove_from_chroma(source_type: str, source_id: int):
@@ -337,6 +292,7 @@ def remove_from_chroma(source_type: str, source_id: int):
         logger.info(f"已从向量库移除 {source_type} {source_id} 的全部分块")
     except Exception as e:
         logger.error(f"从向量库移除 {source_type} {source_id} 失败: {e}")
+        raise
     finally:
         _invalidate_kw_index()
 
@@ -410,19 +366,11 @@ def sync_cooking_note_to_chroma_by_id(note_id: int):
 
 
 def sync_recipe_to_chroma(recipe):
-    """
-    将单个菜谱同步到向量库（增量更新）。
-    采用"先删后插"策略：先按 source_type+source_id 删除所有旧分块，
-    再计算新的 embedding 并插入，保证幂等性和数据一致性。
-    整个过程在 _vs_write_lock 内串行执行（见锁定义处注释）。
-    """
+    """串行写入菜谱新分块，成功后才清理多余的旧分块。"""
     try:
         with _vs_write_lock:
             vs = get_vectorstore()
             text = _build_recipe_text(recipe)
-
-            # 删除该菜谱的所有旧分块（按 metadata 过滤，解决分块 ID 不匹配问题）
-            _delete_chunks_by_prefix(vs, "recipe", recipe.id)
 
             tags_str = "、".join([t.tag.name for t in recipe.tags]) if hasattr(recipe, 'tags') and recipe.tags else ""
 
@@ -439,12 +387,12 @@ def sync_recipe_to_chroma(recipe):
                 for _ in chunks
             ]
 
-            vs.add_texts(chunks, metadatas=metadatas, ids=ids)
+            _upsert_source_chunks(vs, "recipe", recipe.id, chunks, metadatas, ids)
         logger.info(f"已同步菜谱 {recipe.id} ({recipe.title}) 到向量库，共 {len(chunks)} 块")
     except Exception as e:
         logger.error(f"同步菜谱到向量库失败: {e}")
+        raise
     finally:
-        # 无论成功与否（delete 可能已执行），BM25 索引快照都可能过期
         _invalidate_kw_index()
 
 
@@ -454,9 +402,6 @@ def sync_cooking_note_to_chroma(note):
         with _vs_write_lock:
             vs = get_vectorstore()
             text = _build_note_text(note)
-
-            # 删除该心得的所有旧分块
-            _delete_chunks_by_prefix(vs, "cooking_note", note.id)
 
             chunks = _text_splitter.split_text(text)
             ids = [f"note_{note.id}_{i}" for i in range(len(chunks))]
@@ -470,10 +415,11 @@ def sync_cooking_note_to_chroma(note):
                 for _ in chunks
             ]
 
-            vs.add_texts(chunks, metadatas=metadatas, ids=ids)
+            _upsert_source_chunks(vs, "cooking_note", note.id, chunks, metadatas, ids)
         logger.info(f"已同步心得 {note.id} ({note.title}) 到向量库，共 {len(chunks)} 块")
     except Exception as e:
         logger.error(f"同步心得向量库失败: {e}")
+        raise
     finally:
         _invalidate_kw_index()
 
@@ -1059,11 +1005,14 @@ def _single_query_recall(
     if hybrid:
         try:
             results = _hybrid_search(vs, query, top_k, filter_source_type)
-            if results:
-                return results
-            # 双通道均无结果（空库/查询无有效 token）→ 继续走原链路兜底
         except Exception as e:
             logger.error(f"混合检索异常，退回纯向量链路: {e}")
+        else:
+            if results:
+                return results
+            # 双通道均已执行过：向量通道不再重复检索，直接走 metadata 关键词兜底
+            logger.warning("混合检索无结果，切换为关键词兜底搜索")
+            return _fallback_metadata_search(vs, query, top_k, filter_source_type)
 
     search_filter = None
     if filter_source_type:
@@ -1075,7 +1024,6 @@ def _single_query_recall(
         logger.error(f"Chroma 向量搜索失败（将使用关键词兜底）: {e}")
         return _fallback_metadata_search(vs, query, top_k, filter_source_type)
 
-    # 若向量搜索无结果（例如全部零向量时相似度失效），走关键词兜底
     if not docs:
         logger.warning("向量搜索无结果，切换为关键词兜底搜索")
         return _fallback_metadata_search(vs, query, top_k, filter_source_type)
@@ -1117,6 +1065,7 @@ def rag_search(query: str, top_k: int = None, filter_source_type: str = None,
     【降级链路】
       - 查询改写失败/超时/校验不过：回退原查询（不中断、不抛异常）
       - 任一召回通道失败：退化为单通道排序（不中断、不抛异常）
+      - 混合检索双通道均无结果：直接走 metadata 关键词兜底，不重复向量检索
       - 混合检索整体异常/关闭：回退纯向量检索（原链路）
       - 纯向量也无结果：兜底 metadata + 关键词 n-gram 评分
       - 保证任何情况下都不会抛异常导致接口 500
@@ -1407,6 +1356,17 @@ def build_recipe_pool_context(
         if rid and rid not in seen:
             seen.add(rid)
             pool.append(rid)
+    # 向量库可能残留待审核/已删除内容：先校验召回 ID 的可见性，
+    # 避免无效 ID 占满候选池、挤掉后面的热门兜底
+    if pool:
+        visible_ids = {
+            rid for (rid,) in db.query(Recipe.id).filter(
+                Recipe.id.in_(pool),
+                Recipe.status == "approved",
+                Recipe.is_deleted == 0,
+            ).all()
+        }
+        pool = [rid for rid in pool if rid in visible_ids]
     # 召回为空/过少 → 用热门菜谱补齐，保证有可锚定的库内菜
     if len(pool) < max_dishes:
         fill = _get_popular_recipe_ids(
@@ -1432,9 +1392,17 @@ def build_recipe_pool_context(
             joinedload(Recipe.tags).joinedload(RecipeTag.tag),
             selectinload(Recipe.ingredients).joinedload(RecipeIngredient.ingredient),
         )
-        .filter(Recipe.id.in_(pool))
+        .filter(
+            Recipe.id.in_(pool),
+            Recipe.status == "approved",
+            Recipe.is_deleted == 0,
+        )
         .all()
     }
+    # 二次校验：池中只保留实际加载到的可见菜谱
+    pool = [rid for rid in pool if rid in recipes]
+    if not pool:
+        return ""
     rerank_scores = _rerank_pool_scores(
         _effective_rerank_query(query, rewritten_query), pool, recipes
     )
@@ -1558,62 +1526,49 @@ def _load_checkpoint_ids() -> set:
 
 
 def _save_checkpoint_ids(done_ids: set):
-    """保存已完成的文档 ID 集合到断点文件"""
     path = _get_checkpoint_path()
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump({"done_ids": sorted(done_ids)}, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logger.error(f"保存 checkpoint 失败: {e}")
+    temporary_path = path + ".tmp"
+    with open(temporary_path, "w", encoding="utf-8") as f:
+        json.dump({"done_ids": sorted(done_ids)}, f, ensure_ascii=False, indent=2)
+    os.replace(temporary_path, path)
 
 
 def _clear_checkpoint():
-    """清空断点文件"""
     path = _get_checkpoint_path()
     if os.path.exists(path):
-        try:
-            os.remove(path)
-        except Exception as e:
-            logger.warning(f"删除 checkpoint 文件失败: {e}")
+        os.remove(path)
 
 
 def rebuild_vectorstore(db_session=None, resume: bool = True):
-    """
-    全量重建向量库 —— 用于初始化部署或数据修复。
-    遍历所有已通过的菜谱和公开心得，重新计算 embedding 并写入 Chroma。
-
-    支持断点续传：
-      - 默认 resume=True，读取 checkpoint 跳过已编码成功的文档块
-      - 每成功编码并写入一个批次，立即更新 checkpoint
-      - 遇到错误立即终止并抛出异常，已成功的批次会被记录，下次可从断点继续
-      - 如需从头重建，可传入 resume=False（会自动清空 checkpoint）
-    """
+    """串行分批 upsert，全部成功后才清理过期分块；失败保留断点。"""
     if db_session is None:
         return
+    with _vs_write_lock:
+        try:
+            _rebuild_vectorstore(db_session, resume)
+        except Exception:
+            logger.exception("向量库重建未完成，保留旧分块和已有断点")
+            raise
+        finally:
+            _invalidate_kw_index()
 
-    from app.models import Recipe, CookingNote
-    from sqlalchemy.orm import joinedload
+
+def _rebuild_vectorstore(db_session, resume):
+    from app.models import Recipe, CookingNote, RecipeTag, RecipeIngredient
+    from sqlalchemy.orm import joinedload, selectinload
 
     vs = get_vectorstore()
     embedding_model = _get_embedding_model()
-
+    existing_ids = set(vs._collection.get(
+        where={"source_type": {"$in": ["recipe", "cooking_note"]}}, include=[],
+    )["ids"])
     if resume:
-        done_ids = _load_checkpoint_ids()
-        logger.info(f"断点续传：已跳过 {len(done_ids)} 个已编码文档块")
+        done_ids = _load_checkpoint_ids() & existing_ids
     else:
         _clear_checkpoint()
         done_ids = set()
-        # 从头重建必须先清空现有集合。
-        # 注意：删除失败必须抛出，绝不能静默吞掉——
-        # 否则旧分块会残留（曾导致 --from-scratch 无效，收录已删除数据）。
-        # Chroma 新版本不接受 delete(where={}) 表示"全删"，需用 $in 覆盖两种已知 source_type。
-        vs._collection.delete(
-            where={"source_type": {"$in": ["recipe", "cooking_note"]}}
-        )
-        # 全库已清空，BM25 索引快照立即失效
-        _invalidate_kw_index()
 
-    # 构建待编码文档列表
+    target_ids = set()
     pending_texts = []
     pending_metadatas = []
     pending_ids = []
@@ -1621,7 +1576,11 @@ def rebuild_vectorstore(db_session=None, resume: bool = True):
     # 菜谱
     recipes = (
         db_session.query(Recipe)
-        .options(joinedload(Recipe.tags))
+        .options(
+            joinedload(Recipe.tags).joinedload(RecipeTag.tag),
+            selectinload(Recipe.ingredients).joinedload(RecipeIngredient.ingredient),
+            selectinload(Recipe.steps),
+        )
         .filter(Recipe.status == "approved", Recipe.is_deleted == 0)
         .all()
     )
@@ -1631,6 +1590,7 @@ def rebuild_vectorstore(db_session=None, resume: bool = True):
         tags_str = "、".join([t.tag.name for t in recipe.tags]) if recipe.tags else ""
         for i, chunk in enumerate(chunks):
             doc_id = f"recipe_{recipe.id}_{i}"
+            target_ids.add(doc_id)
             if doc_id in done_ids:
                 continue
             pending_texts.append(chunk)
@@ -1652,6 +1612,7 @@ def rebuild_vectorstore(db_session=None, resume: bool = True):
         chunks = _text_splitter.split_text(text)
         for i, chunk in enumerate(chunks):
             doc_id = f"note_{note.id}_{i}"
+            target_ids.add(doc_id)
             if doc_id in done_ids:
                 continue
             pending_texts.append(chunk)
@@ -1663,68 +1624,27 @@ def rebuild_vectorstore(db_session=None, resume: bool = True):
             })
             pending_ids.append(doc_id)
 
-    total_pending = len(pending_texts)
-    if total_pending == 0:
-        logger.info("没有需要编码的新文档块，向量库已是最新")
-        if resume:
-            _clear_checkpoint()
-        return
-
-    logger.info(f"开始重建向量库：共 {total_pending} 个待编码文档块")
-
     batch_size = settings.RAG_EMBEDDING_BATCH_SIZE
     if batch_size <= 0:
-        batch_size = total_pending
-
-    processed_in_run = 0
-    for start in range(0, total_pending, batch_size):
-        end = min(start + batch_size, total_pending)
-        batch_texts = pending_texts[start:end]
-        batch_metadatas = pending_metadatas[start:end]
+        batch_size = len(pending_ids) or 1
+    done_ids.intersection_update(target_ids)
+    for start in range(0, len(pending_ids), batch_size):
+        end = start + batch_size
         batch_ids = pending_ids[start:end]
+        batch_texts = pending_texts[start:end]
+        embeddings = embedding_model.embed_documents(batch_texts)
+        vs._collection.upsert(
+            embeddings=embeddings, documents=batch_texts,
+            metadatas=pending_metadatas[start:end], ids=batch_ids,
+        )
+        done_ids.update(batch_ids)
+        _save_checkpoint_ids(done_ids)
+        _invalidate_kw_index()
+        logger.info(f"向量库重建进度：{min(end, len(pending_ids))}/{len(pending_ids)}")
 
-        try:
-            # 先删除本批次 ID（幂等：防止上次中断导致部分残留）
-            try:
-                vs._collection.delete(ids=batch_ids)
-            except Exception:
-                pass
-
-            # 分批编码：出错会抛出异常
-            embeddings = embedding_model._embed(batch_texts, raise_on_error=True)
-
-            # 写入 Chroma
-            vs._collection.add(
-                embeddings=embeddings,
-                documents=batch_texts,
-                metadatas=batch_metadatas,
-                ids=batch_ids,
-            )
-
-            # 更新断点
-            done_ids.update(batch_ids)
-            _save_checkpoint_ids(done_ids)
-
-            processed_in_run += len(batch_ids)
-            logger.info(
-                f"向量库重建进度：{processed_in_run}/{total_pending} "
-                f"（本批次 {len(batch_ids)} 个）"
-            )
-        except Exception as e:
-            logger.error(
-                f"向量库重建失败，已终止于第 {start} 个文档块 "
-                f"（批次 {start}-{end}）: {e}"
-            )
-            logger.error(
-                f"已记录 {len(done_ids)} 个成功文档块，下次 rebuild_vectorstore() "
-                f"传入 resume=True 可断点续传"
-            )
-            _invalidate_kw_index()  # 中途终止：已写入的批次需让索引失效
-            raise
-
-    logger.info(f"向量库重建完成：本次共编码 {processed_in_run} 个文档块")
-    _invalidate_kw_index()  # 重建成功：索引按新库状态重建
-
-    # 全部成功后清空 checkpoint
-    if resume:
-        _clear_checkpoint()
+    # 清理失败也保留断点，重试只需完成尾部清理，不必再次调用 Embedding。
+    stale_ids = sorted(existing_ids - target_ids)
+    if stale_ids:
+        vs._collection.delete(ids=stale_ids)
+    _clear_checkpoint()
+    logger.info(f"向量库重建完成：本次共编码 {len(pending_ids)} 个文档块")

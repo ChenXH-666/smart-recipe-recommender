@@ -113,6 +113,44 @@ class TestRecipePoolContext:
         assert "为他人做菜" in body
         assert "不强制规避" in body
 
+    def test_pool_excludes_pending_and_deleted_recipes(
+        self, db_session, _patch_retrieval, monkeypatch
+    ):
+        approved = _recipe(db_session, "正常菜", cost=20)
+        pending = Recipe(title="待审核菜", status="pending", is_deleted=0)
+        deleted = Recipe(title="已删除菜", status="approved", is_deleted=1)
+        db_session.add_all([pending, deleted])
+        db_session.flush()
+
+        monkeypatch.setattr(rag, "rag_search", lambda *a, **k: [
+            {"source_id": approved.id},
+            {"source_id": pending.id},
+            {"source_id": deleted.id},
+        ])
+        body = rag.build_recipe_pool_context(db_session, "随便", restriction_set=set())
+
+        assert "正常菜" in body
+        assert "待审核菜" not in body
+        assert "已删除菜" not in body
+
+    def test_all_invalid_recall_falls_back_to_popular(
+        self, db_session, _patch_retrieval, monkeypatch
+    ):
+        # 召回结果全部因状态不可见被剔除时，热门兜底仍须补位，避免空上下文
+        approved = _recipe(db_session, "热门正常菜", cost=20)
+        pending = Recipe(title="待审核菜", status="pending", is_deleted=0)
+        db_session.add(pending)
+        db_session.flush()
+
+        monkeypatch.setattr(rag, "rag_search",
+                            lambda *a, **k: [{"source_id": pending.id}])
+        monkeypatch.setattr(rag, "_get_popular_recipe_ids",
+                            lambda *a, **k: [approved.id])
+        body = rag.build_recipe_pool_context(db_session, "随便", restriction_set=set())
+
+        assert "热门正常菜" in body
+        assert "待审核菜" not in body
+
 
 # ------------------------- Rerank 精排（两阶段检索第二级） -------------------------
 

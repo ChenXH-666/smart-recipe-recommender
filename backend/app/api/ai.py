@@ -2,7 +2,7 @@
 
 安全设计：
   - 创建会话后立即校验 conv.id 是否生成成功
-  - 流式响应生成器内部使用独立 session，避免依赖注入 session 被提前关闭
+  - get_db 使用请求生命周期（FastAPI 0.136.3 在流结束后关闭），回复保存使用独立事务
   - 生成器内部捕获所有异常，避免 SSE 中断导致前端无 [DONE] 标记
   - AI 回复保存失败不阻断响应（已发送给客户端的内容无法回滚）
   - /chat 按客户端 IP 限流（20次/分钟）：每轮对话消耗 Embedding/Rerank/LLM
@@ -96,7 +96,7 @@ async def ai_chat(
     conv.updated_at = datetime.now()
     db.commit()
 
-    # 流式响应：生成器内部创建独立 session，避免依赖注入 session 被提前关闭
+    # get_db 在整个流期间有效；独立 session 仅用于隔离回复保存事务
     # 忌口过滤：将当前用户忌口标签传入，供 RAG 候选剔除触忌口的菜谱
     restriction_set = get_restriction_set(current_user)
 
@@ -118,43 +118,53 @@ async def ai_chat(
             llm_failed = True
             yield f"data: {json.dumps(AI_ERROR_MSG, ensure_ascii=False)}\n\n"
 
-        yield "data: [DONE]\n\n"
-
         # 失败提示不落库：错误提示若写入消息表，缓存 miss 重建 memory 时
         # 会重新进入对话上下文污染语义（前端已实时展示该提示，无需持久化）
-        if llm_failed:
-            return
         # LLM 流中途失败：ai_service 会先流出部分正文、再以 AI_ERROR_MSG 收尾。
         # 剥掉错误尾缀后仅把真实生成的正文落库（与 memory 中保留的内容一致）；
         # 一字未出则整体跳过
         if full_response.endswith(AI_ERROR_MSG):
             full_response = full_response[:-len(AI_ERROR_MSG)]
             if not full_response.strip():
-                return
+                llm_failed = True
 
         # 使用独立 session 保存 AI 回复（保存失败不影响已发送给客户端的响应）
-        if not full_response.strip():
-            full_response = "（AI 未返回有效内容）"
-        sse_db = SessionLocal()
-        try:
-            ai_msg = AiMessage(
-                conversation_id=conversation_id,
-                role="assistant",
-                content=full_response,
-            )
-            sse_db.add(ai_msg)
-            # 独立 session 中同样需显式刷新会话 updated_at（见上方注释）
-            sse_db.execute(
-                update(AiConversation)
-                .where(AiConversation.id == conversation_id)
-                .values(updated_at=datetime.now())
-            )
-            sse_db.commit()
-        except Exception as e:
-            logger.exception(f"保存 AI 回复失败: {e}")
-            sse_db.rollback()
-        finally:
-            sse_db.close()
+        if not llm_failed:
+            if not full_response.strip():
+                full_response = "（AI 未返回有效内容）"
+            sse_db = None
+            try:
+                sse_db = SessionLocal()
+                ai_msg = AiMessage(
+                    conversation_id=conversation_id,
+                    role="assistant",
+                    content=full_response,
+                )
+                sse_db.add(ai_msg)
+                # 独立 session 中同样需显式刷新会话 updated_at（见上方注释）
+                sse_db.execute(
+                    update(AiConversation)
+                    .where(AiConversation.id == conversation_id)
+                    .values(updated_at=datetime.now())
+                )
+                sse_db.commit()
+            except Exception:
+                logger.exception("保存 AI 回复失败，会话 %s", conversation_id)
+                clear_memory(conversation_id)
+                if sse_db is not None:
+                    try:
+                        sse_db.rollback()
+                    except Exception:
+                        logger.exception("回滚 AI 回复失败，会话 %s", conversation_id)
+                yield f"data: {json.dumps('回答已生成，但保存失败，请稍后重试。', ensure_ascii=False)}\n\n"
+            finally:
+                if sse_db is not None:
+                    try:
+                        sse_db.close()
+                    except Exception:
+                        logger.exception("关闭 AI 回复会话失败，会话 %s", conversation_id)
+
+        yield "data: [DONE]\n\n"
 
     return StreamingResponse(
         event_stream(),
