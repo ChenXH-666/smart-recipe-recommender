@@ -85,11 +85,11 @@ class Settings(BaseSettings):
     EMBEDDING_API_KEY: str = ""  # 必须通过 .env 注入，禁止硬编码
     EMBEDDING_API_URL: str = "https://api.siliconflow.cn/v1/embeddings"
 
-    # LLM（默认小米 Mimo mimo-v2.5，走 OpenAI 兼容接口）
+    # LLM（默认小米 Mimo mimo-v2.6-flash，走 OpenAI 兼容接口）
     #   - LLM_PROVIDER=mimo 时自动关闭其默认开启的深度思考（thinking.type=disabled）
     #   - Embedding / Rerank 恒用 SiliconFlow（EMBEDDING_API_KEY），与 LLM 相互独立
     LLM_PROVIDER: str = "mimo"
-    LLM_MODEL: str = "mimo-v2.5"
+    LLM_MODEL: str = "mimo-v2.6-flash"
     LLM_API_KEY: str = ""  # 必须通过 .env 注入，禁止硬编码
     LLM_BASE_URL: str = "https://api.xiaomimimo.com/v1"
     LLM_TEMPERATURE: float = 0.7  # 0.7 平衡创造性与稳定性

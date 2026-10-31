@@ -101,7 +101,7 @@ def _get_llm():
     """
     获取 LLM 实例（单例缓存，见 _llm_instance 注释）。
 
-    默认使用小米 Mimo 的 mimo-v2.5 模型（LLM_PROVIDER=mimo 时自动关闭其
+    默认使用小米 Mimo 的 mimo-v2.6-flash 模型（LLM_PROVIDER=mimo 时自动关闭其
     默认开启的深度思考，只输出最终答案），通过 OpenAI 兼容 API 调用。
     temperature=0.7 在创造性和稳定性之间取得平衡。
     """
@@ -119,7 +119,7 @@ def _get_llm():
     if settings.LLM_BASE_URL:
         kwargs["openai_api_base"] = settings.LLM_BASE_URL
     if settings.LLM_PROVIDER == "mimo":
-        # MiMo mimo-v2.5 / mimo-v2.5-pro 默认开启深度思考（返回 reasoning_content 推理链）。
+        # MiMo 模型默认开启深度思考（返回 reasoning_content 推理链）。
         # 这里自动关闭，只返回最终答案。注意：thinking 是 MiMo 非标准 OpenAI 参数，
         # 必须走 extra_body（用 model_kwargs 会被当成 create() 顶层参数，触发 TypeError）。
         # 该分支仅当 LLM_PROVIDER=mimo 时生效，切换回 SiliconFlow 天然不会误传。
