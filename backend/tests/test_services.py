@@ -113,6 +113,26 @@ class TestRecipePoolContext:
         assert "为他人做菜" in body
         assert "不强制规避" in body
 
+    def test_all_candidates_violate_restriction_hard_filtered(
+        self, db_session, _patch_retrieval, monkeypatch
+    ):
+        """候选全部触忌口：不放宽、不推荐，返回仅含安全说明的上下文"""
+        from app.models import RecipeIngredient, Ingredient
+        seafood = Ingredient(name="虾", diet_tags=["seafood"])
+        r = _recipe(db_session, "白灼虾", cost=40)
+        db_session.add(seafood)
+        db_session.flush()
+        db_session.add(RecipeIngredient(recipe_id=r.id, ingredient_id=seafood.id))
+        db_session.flush()
+        monkeypatch.setattr(rag, "rag_search", lambda *a, **k: [{"source_id": r.id}])
+        body = rag.build_recipe_pool_context(
+            db_session, "随便来点海鲜", restriction_set={"seafood"},
+        )
+        # 触忌口菜谱不得出现在候选池，且上下文明确要求模型拒绝推荐
+        assert "白灼虾" not in body and "白灼" not in body
+        assert "全部触碰用户忌口" in body
+        assert "不做菜品推荐" in body
+
     def test_pool_excludes_pending_and_deleted_recipes(
         self, db_session, _patch_retrieval, monkeypatch
     ):

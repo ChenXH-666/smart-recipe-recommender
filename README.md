@@ -165,7 +165,7 @@ cd backend
 conda activate food
 python -m pytest tests -v --cov=app --cov-report=term-missing
 ```
-测试基于 pytest 编写，共 322 个用例，覆盖纯函数 / 模型 / 服务 / 接口四层；数据库使用 SQLite 内存库，LLM/Embedding HTTP 使用假响应，向量写入回归使用关闭遥测的临时内存 Chroma 集合，不访问业务 MySQL、持久化向量目录或模型服务。未安装 pytest-cov 时可运行 `python -m pytest tests -q`。历史行覆盖率约 64%、核心逻辑 77%~100%，本轮未重新测量覆盖率。
+测试基于 pytest 编写，共 323 个用例，覆盖纯函数 / 模型 / 服务 / 接口四层；数据库使用 SQLite 内存库，LLM/Embedding HTTP 使用假响应，向量写入回归使用关闭遥测的临时内存 Chroma 集合，不访问业务 MySQL、持久化向量目录或模型服务。未安装 pytest-cov 时可运行 `python -m pytest tests -q`。历史行覆盖率约 64%、核心逻辑 77%~100%，本轮未重新测量覆盖率。
 
 ### 7. 运行接口性能基准
 ```bash
@@ -291,7 +291,7 @@ curl -H "Authorization: Bearer $TOKEN" "http://localhost:8000/api/recipes/1" &
 | 全量重建先清库、失败后只剩半库 | 不再启动即清库；按批 upsert，成功后原子替换断点文件，所有批次完成才清理过期 ID；失败保留未完成批次旧数据和已保存断点，清理失败也可续传 |
 | SSE 提前报告结束、保存失败不可见 | `[DONE]` 在保存处理完成后发送；保存失败返回不含内部异常的提示并清除会话内存，避免与数据库历史不一致 |
 
-验证：`cd backend` 后运行 `python -m pytest tests -q --disable-warnings`，本轮 **322 passed，24 warnings**；无 xfail。覆盖异常索引/向量、增量写入失败不删旧块、重建中断与恢复、断点替换失败、SSE 结束标记当下的数据持久化、保存失败与会话权限。警告来自已有依赖弃用及 SciPy/NumPy 版本兼容提示，未修改环境或升级依赖。
+验证：`cd backend` 后运行 `python -m pytest tests -q --disable-warnings`，本轮 **323 passed，23 warnings**；无 xfail。覆盖异常索引/向量、增量写入失败不删旧块、重建中断与恢复、断点替换失败、SSE 结束标记当下的数据持久化、保存失败与会话权限。警告来自已有依赖弃用及 SciPy/NumPy 版本兼容提示，未修改环境或升级依赖。
 
 边界与运维：
 - 本轮未连接生产服务，也未重建现有持久化索引；历史零向量和旧分块不会因为改代码自动消失，需另行安排重建。

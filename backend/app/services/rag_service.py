@@ -1316,14 +1316,18 @@ def build_recipe_pool_context(
          沉底；精排失败/超时自动降级为召回原序，主链路不受影响。
       ② 预算感知：从消息中识别预算，预算内菜品排序靠前（精排激活时组内保持
          相关度序），并在上下文附预算提示，让模型按真实成本排菜单、报总价。
-      ③ 永不空：召回 + 热门兜底 + 忌口全中时放宽，三重保证不带空上下文给模型。
+      ③ 忌口安全：触忌口/过敏原的菜谱一律硬性剔除；候选全部触忌口时不放宽、
+         不降级为"推荐并备注"，直接返回仅含安全说明的上下文，由模型明确告知
+         没有安全选择——过敏风险不能依赖模型自觉看备注。
 
     紧凑格式（标题/成本/食材/标签/短简介）使同等 token 承载更多真实菜谱，
     并避免粘贴冗长步骤。
 
     忌口策略（restriction_set 若非空）：
       - relax_restriction=False（默认，用户为自己做菜）：
-        * 先硬性剔除触忌口的菜谱；若候选全部触忌口，放宽到未过滤池并备注让模型如实说明。
+        * 硬性剔除触忌口的菜谱；候选全部触忌口时【不放宽】——过敏原/忌口涉及
+          人身安全，"推荐后再让模型备注"依赖模型自觉，不构成安全兜底。
+          此时返回仅含安全说明的上下文，要求模型明确告知没有安全选择。
       - relax_restriction=True（用户在为他人做菜）：
         * 不硬性拦截，仅把用户忌口作为参考信息给模型，以对方要求为准。
     """
@@ -1420,15 +1424,17 @@ def build_recipe_pool_context(
     restrict_list = sorted(restriction_set) if restriction_set else []
     if restrict_list and not relax_restriction:
         allowed_set = filter_recipe_ids(db, pool, restriction_set)
-        allowed = [rid for rid in pool if rid in allowed_set]
-        if allowed:
-            pool = allowed
-        else:
-            # 全部候选都触忌口 → 放宽避免空上下文，让模型如实告知
-            notes.append(
-                "注意：检索到的候选菜谱全部触碰用户忌口"
-                f"（{', '.join(restrict_list)}），为不让结果为空已临时放宽。"
-                "请优先如实指出这些菜存在用户忌口；若确实没有安全选择，应明确告知，不要硬推荐。"
+        pool = [rid for rid in pool if rid in allowed_set]
+        if not pool:
+            # 候选全部触忌口 → 安全优先于"不空池"：绝不把触忌口的菜交还给模型
+            # （模型可能漏看备注、用户可能忽略提示），返回仅含安全说明的上下文，
+            # 由模型明确拒绝推荐，而不是"推荐并附备注"
+            return (
+                "（检索到的候选菜谱全部触碰用户忌口/过敏原"
+                f"（{', '.join(restrict_list)}），出于安全考虑已全部剔除。）\n"
+                "请明确告知用户：当前菜谱库中没有不触碰其忌口/过敏原的安全候选，"
+                "本次不做菜品推荐；不要罗列或暗示任何含相关食材的菜，也不要编造"
+                "库外菜名。可建议用户调整忌口设置或更换需求后重试。"
             )
     elif restrict_list and relax_restriction:
         notes.append(

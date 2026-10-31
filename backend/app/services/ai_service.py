@@ -69,7 +69,7 @@ def _get_or_create_memory(conversation_id: int) -> ConversationBufferMemory:
 
     ConversationBufferMemory 是 LangChain 的内存实现，
     内部维护 chat_memory 存储 user/assistant 消息对。
-    最近只保留 10 轮历史发送给 LLM（在 chat_stream 中截断）。
+    最近只保留 10 条消息发送给 LLM（在 chat_stream 中截断）。
 
     LRU 淘汰：命中时移动到队尾；超过 256 个活跃会话时淘汰队首
     （最久未活跃的会话，其历史可随时从数据库恢复）。
@@ -240,7 +240,7 @@ async def chat_stream(
       5. 流式结束后，将完整对话保存到 memory
 
     设计考量：
-      - 只保留最近 10 轮历史，避免 context 窗口溢出和 token 浪费
+      - 只保留最近 10 条历史消息（约 5 轮问答），避免 context 窗口溢出和 token 浪费
       - 系统提示词保持静态稳定前缀以便提示词缓存命中；动态内容放用户消息尾部
       - RAG 失败不影响主流程，降级为纯 LLM 回答
       - RAG 检索（含同步 Embedding/Rerank HTTP 调用）经 asyncio.to_thread 放入
@@ -279,7 +279,7 @@ async def chat_stream(
     #   动态内容全部放末尾，保证稳定前缀逐字节一致，最大化提示词缓存命中率
     messages = [SystemMessage(content=SYSTEM_PROMPT)]
 
-    # 添加历史对话（截断最近10轮，避免 token 浪费）
+    # 添加历史对话（截断最近 10 条消息，避免 token 浪费）
     history = memory.chat_memory.messages
     messages.extend(history[-10:])
 
